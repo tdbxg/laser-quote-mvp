@@ -422,6 +422,54 @@ def spline_to_lines(layer: str, degree: int, knots: Sequence[float], controls: S
     return [Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-9]
 
 
+Transform = Tuple[float, float, float, float, float]
+
+
+def _transform_point(pt: Tuple[float, float], transform: Transform) -> Tuple[float, float]:
+    tx, ty, sx, sy, rot_deg = transform
+    x, y = pt[0] * sx, pt[1] * sy
+    a = math.radians(rot_deg)
+    return (x * math.cos(a) - y * math.sin(a) + tx, x * math.sin(a) + y * math.cos(a) + ty)
+
+
+def _compose_transform(parent: Transform, child: Transform) -> Transform:
+    cx, cy = _transform_point((child[0], child[1]), parent)
+    return (cx, cy, parent[2] * child[2], parent[3] * child[3], parent[4] + child[4])
+
+
+def _ellipse_to_lines(layer: str, data: List[Tuple[str, str]], transform: Transform, samples: int = 96) -> List[Line]:
+    center = (_float(data, "10"), _float(data, "20"))
+    major = (_float(data, "11"), _float(data, "21"))
+    ratio = _float(data, "40", 1.0)
+    start = _float(data, "41", 0.0)
+    end = _float(data, "42", math.tau)
+    while end <= start:
+        end += math.tau
+    minor = (-major[1] * ratio, major[0] * ratio)
+    steps = max(8, int(samples * min((end - start) / math.tau, 1.0)))
+    pts = []
+    for i in range(steps + 1):
+        t = start + (end - start) * i / steps
+        pt = (center[0] + math.cos(t) * major[0] + math.sin(t) * minor[0], center[1] + math.cos(t) * major[1] + math.sin(t) * minor[1])
+        pts.append(_transform_point(pt, transform))
+    return [Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-9]
+
+
+def _collect_blocks(pairs: Sequence[Tuple[str, str]]) -> Dict[str, List[Tuple[str, List[Tuple[str, str]]]]]:
+    blocks: Dict[str, List[Tuple[str, List[Tuple[str, str]]]]] = {}
+    current = ""
+    for ent_type, data in iter_dxf_entities(pairs, "BLOCKS"):
+        if ent_type == "BLOCK":
+            current = _last(data, "2") or _last(data, "3")
+            if current:
+                blocks[current] = []
+        elif ent_type == "ENDBLK":
+            current = ""
+        elif current:
+            blocks[current].append((ent_type, data))
+    return blocks
+
+
 def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = ()) -> Tuple[List[Line | Arc], List[Circle], Dict[str, int], Dict[str, int]]:
     include_set = set(include_layers or [])
     segments: List[Line | Arc] = []
@@ -432,64 +480,94 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
 
-    entities = list(iter_dxf_entities(pairs, "ENTITIES"))
-    i = 0
-    while i < len(entities):
-        ent_type, data = entities[i]
-        layer = _last(data, "8", "")
-        layer_counts[layer] = layer_counts.get(layer, 0) + 1
-        if include_set and layer not in include_set:
-            skip(f"skip_layer:{layer}")
-            i += 1
-            continue
-        if layer_excluded(layer, exclude_layer_keywords):
-            skip(f"skip_layer:{layer}")
-            i += 1
-            continue
-        if ent_type == "LINE":
-            segments.append(Line(layer, _float(data, "10"), _float(data, "20"), _float(data, "11"), _float(data, "21")))
-        elif ent_type == "ARC":
-            segments.append(Arc(layer, _float(data, "10"), _float(data, "20"), _float(data, "40"), _float(data, "50"), _float(data, "51")))
-        elif ent_type == "CIRCLE":
-            r = _float(data, "40")
-            if r > 0:
-                circles.append(Circle(layer, _float(data, "10"), _float(data, "20"), r))
-        elif ent_type == "LWPOLYLINE":
-            pts = list(zip(_floats(data, "10"), _floats(data, "20")))
-            if len(pts) >= 2:
-                if _int(data, "70") & 1:
-                    pts.append(pts[0])
+    blocks = _collect_blocks(pairs)
+
+    def add_entities(entities: List[Tuple[str, List[Tuple[str, str]]]], transform: Transform = (0.0, 0.0, 1.0, 1.0, 0.0), default_layer: str = "", depth: int = 0) -> None:
+        if depth > 5:
+            skip("unsupported_type:INSERT_DEPTH")
+            return
+        i = 0
+        while i < len(entities):
+            ent_type, data = entities[i]
+            raw_layer = _last(data, "8", "")
+            layer = default_layer if raw_layer in {"", "0"} and default_layer else raw_layer
+            layer_counts[layer] = layer_counts.get(layer, 0) + 1
+            if include_set and layer not in include_set:
+                skip(f"skip_layer:{layer}")
+                i += 1
+                continue
+            if layer_excluded(layer, exclude_layer_keywords):
+                skip(f"skip_layer:{layer}")
+                i += 1
+                continue
+            if ent_type == "LINE":
+                p1 = _transform_point((_float(data, "10"), _float(data, "20")), transform)
+                p2 = _transform_point((_float(data, "11"), _float(data, "21")), transform)
+                segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1]))
+            elif ent_type == "ARC":
+                pts = [_transform_point(p, transform) for p in Arc(layer, _float(data, "10"), _float(data, "20"), _float(data, "40"), _float(data, "50"), _float(data, "51")).points()]
                 segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
-        elif ent_type == "POLYLINE":
-            pts: List[Tuple[float, float]] = []
-            closed = (_int(data, "70") & 1) == 1
-            j = i + 1
-            while j < len(entities):
-                child_type, child_data = entities[j]
-                if child_type == "SEQEND":
-                    break
-                if child_type == "VERTEX":
-                    pts.append((_float(child_data, "10"), _float(child_data, "20")))
-                j += 1
-            if len(pts) >= 2:
-                if closed:
-                    pts.append(pts[0])
-                segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+            elif ent_type == "CIRCLE":
+                r = _float(data, "40")
+                if r > 0:
+                    if abs(transform[2] - transform[3]) < 1e-9 and abs(transform[4]) < 1e-9:
+                        c = _transform_point((_float(data, "10"), _float(data, "20")), transform)
+                        circles.append(Circle(layer, c[0], c[1], r * abs(transform[2])))
+                    else:
+                        lines = _ellipse_to_lines(layer, [("10", _last(data, "10")), ("20", _last(data, "20")), ("11", str(r)), ("21", "0"), ("40", "1"), ("41", "0"), ("42", str(math.tau))], transform)
+                        segments.extend(lines)
+            elif ent_type == "LWPOLYLINE":
+                pts = [_transform_point(p, transform) for p in zip(_floats(data, "10"), _floats(data, "20"))]
+                if len(pts) >= 2:
+                    if _int(data, "70") & 1:
+                        pts.append(pts[0])
+                    segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+            elif ent_type == "POLYLINE":
+                pts: List[Tuple[float, float]] = []
+                closed = (_int(data, "70") & 1) == 1
+                j = i + 1
+                while j < len(entities):
+                    child_type, child_data = entities[j]
+                    if child_type == "SEQEND":
+                        break
+                    if child_type == "VERTEX":
+                        pts.append(_transform_point((_float(child_data, "10"), _float(child_data, "20")), transform))
+                    j += 1
+                if len(pts) >= 2:
+                    if closed:
+                        pts.append(pts[0])
+                    segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+                else:
+                    skip("unsupported_type:POLYLINE")
+                i = j
+            elif ent_type in {"VERTEX", "SEQEND"}:
+                pass
+            elif ent_type == "SPLINE":
+                lines = spline_to_lines(layer, _int(data, "71", 3), _floats(data, "40"), list(zip(_floats(data, "10"), _floats(data, "20"))), _int(data, "70", 0))
+                if lines:
+                    for line in lines:
+                        p1 = _transform_point((line.x1, line.y1), transform)
+                        p2 = _transform_point((line.x2, line.y2), transform)
+                        segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1]))
+                    skip("approx_type:SPLINE")
+                else:
+                    skip("unsupported_type:SPLINE")
+            elif ent_type == "ELLIPSE":
+                segments.extend(_ellipse_to_lines(layer, data, transform))
+                skip("approx_type:ELLIPSE")
+            elif ent_type == "INSERT":
+                name = _last(data, "2")
+                if name in blocks:
+                    child = (_float(data, "10"), _float(data, "20"), _float(data, "41", 1.0), _float(data, "42", 1.0), _float(data, "50", 0.0))
+                    add_entities(blocks[name], _compose_transform(transform, child), layer, depth + 1)
+                    skip("expanded_type:INSERT")
+                else:
+                    skip("unsupported_type:INSERT")
             else:
-                skip("unsupported_type:POLYLINE")
-            i = j
-        elif ent_type in {"VERTEX", "SEQEND"}:
-            pass
-        elif ent_type == "SPLINE":
-            lines = spline_to_lines(layer, _int(data, "71", 3), _floats(data, "40"), list(zip(_floats(data, "10"), _floats(data, "20"))), _int(data, "70", 0))
-            if lines:
-                segments.extend(lines)
-                skip("approx_type:SPLINE")
-            else:
-                skip("unsupported_type:SPLINE")
-        else:
-            skip(f"skip_type:{ent_type}" if ent_type in {"TEXT", "MTEXT", "DIMENSION", "INSERT", "HATCH"} else f"unsupported_type:{ent_type}")
-        i += 1
+                skip(f"skip_type:{ent_type}" if ent_type in {"TEXT", "MTEXT", "DIMENSION", "HATCH"} else f"unsupported_type:{ent_type}")
+            i += 1
+
+    add_entities(list(iter_dxf_entities(pairs, "ENTITIES")))
     return segments, circles, layer_counts, skipped
 
 
