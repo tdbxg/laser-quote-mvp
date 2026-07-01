@@ -70,19 +70,19 @@ INDEX_HTML = """<!doctype html>
         <div class="grid"><label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label></div>
         <div class="actions"><button id="analyzeBtn" type="button">1. 提取 DXF 信息</button><span id="message" class="muted"></span></div>
         <div id="pricingFields" style="display:none">
-          <p class="hint">先确认下方 DXF 基础信息，再修改报价参数并计算金额。这些数值是系统默认值，不是从 DXF 自动读取。</p>
+          <p class="hint">先确认下方 DXF 基础信息，再修改报价参数并计算金额。</p>
           <div class="grid">
-            <label>材质 默认值<input name="material" value="Q235" /></label>
-            <label>厚度 mm 默认值<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
-            <label>数量 默认值<input name="quantity" type="number" step="1" value="1" /></label>
-            <label>密度 g/cm3 默认值<input name="density_g_cm3" type="number" step="0.0001" value="7.85" /></label>
-            <label>材料价 元/kg 默认值<input name="material_price_per_kg" type="number" step="0.01" value="4" /></label>
-            <label>废料价 元/kg 默认值<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
-            <label>切割价 元/m 默认值<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
-            <label>穿孔价 元/次 默认值<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
-            <label>其他工序 元/件 默认值<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
-            <label>利润率 默认值<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
-            <label>税率 默认值<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
+            <label>材质<input name="material" value="Q235" /></label>
+            <label>厚度 mm<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
+            <label>数量<input name="quantity" type="number" step="1" value="1" /></label>
+            <label>密度 g/cm3<input name="density_g_cm3" type="number" step="0.0001" value="7.85" /></label>
+            <label>材料价 元/kg<input name="material_price_per_kg" type="number" step="0.01" value="4" /></label>
+            <label>废料价 元/kg<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
+            <label>切割价 元/m<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
+            <label>穿孔价 元/次<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
+            <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
+            <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
+            <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
             <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
           </div>
           <div class="actions"><button id="submitBtn" type="submit">2. 计算待确认报价</button><span id="downloadLinks" class="links"></span></div>
@@ -91,9 +91,8 @@ INDEX_HTML = """<!doctype html>
     </section>
     <section id="result" style="display:none">
       <section class="panel"><h2>汇总</h2><div id="summary" class="summary"></div></section>
-      <section id="accuracyPanel" class="panel"><h2>准确性状态</h2><p id="accuracyText"></p></section>
+      <section id="accuracyPanel" class="panel"><h2>复核提示</h2><p id="accuracyText"></p></section>
       <section class="panel"><h2>基础几何信息</h2><div class="table-wrap"><table id="geometryTable"></table></div></section>
-      <section class="panel"><h2>文件状态</h2><div class="table-wrap"><table id="statusTable"></table></div></section>
       <section class="panel"><h2>报价明细</h2><div class="table-wrap"><table id="quoteTable"></table></div></section>
     </section>
   </main>
@@ -106,14 +105,23 @@ INDEX_HTML = """<!doctype html>
     const downloads = document.getElementById("downloadLinks");
     const pricingFields = document.getElementById("pricingFields");
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-    function table(el, headers, rows) { const body = rows.length ? rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") : `<tr><td colspan="${headers.length}">没有识别到可显示数据，请查看“文件状态”的跳过实体、图层和错误原因。</td></tr>`; el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" + body + "</tbody>"; }
+    function table(el, headers, rows) { const body = rows.length ? rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") : `<tr><td colspan="${headers.length}">暂无可显示数据。</td></tr>`; el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" + body + "</tbody>"; }
+    function reviewText(data) {
+      const rows = data.status_rows || [];
+      const messages = [];
+      rows.forEach(r => {
+        if (r.error) messages.push(`${r.source_file}：${r.error}`);
+        (r.review_notes || []).forEach(note => messages.push(`${r.source_file}：${note}`));
+      });
+      if (messages.length) return messages.join("；");
+      return "已识别有效轮廓。自动结果仍建议与原图人工核对后再作为正式报价。";
+    }
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
       document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "总面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
-      const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = `${a.policy} 需人工复核文件数：${a.requires_review_count}；无报价行文件数：${a.empty_result_count}`;
-      table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["需确认", r => r.approximate ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["边界框", r => (r.bbox || []).map(v => Number(v).toFixed(4)).join(" , ")], ["质心", r => r.centroid ? r.centroid.map(v => Number(v).toFixed(4)).join(" , ") : ""], ["惯性矩 X/Y mm⁴", r => `${Number(r.inertia_centroid_x_mm4 || 0).toFixed(4)} / ${Number(r.inertia_centroid_y_mm4 || 0).toFixed(4)}`], ["惯性积 XY mm⁴", r => r.inertia_centroid_xy_mm4 == null ? "" : Number(r.inertia_centroid_xy_mm4).toFixed(4)], ["回转半径 X/Y mm", r => `${Number(r.radius_gyration_x_mm || 0).toFixed(4)} / ${Number(r.radius_gyration_y_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
-      table(document.getElementById("statusTable"), [["文件", "source_file"], ["成功", r => r.ok ? "是" : "否"], ["需复核", r => r.requires_review ? "是" : "否"], ["有效轮廓", r => `${r.profiles_used_count}/${r.profiles_all_count}`], ["开放路径", r => `${Number(r.open_path_length_m || 0).toFixed(4)} m / ${r.open_path_count || 0} 组`], ["跳过实体", r => JSON.stringify(r.skipped_counts || {})], ["提醒/错误", r => (r.warnings || []).join("；") || r.error]], data.status_rows || []);
+      const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = reviewText(data);
+      table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
       table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(4)], ["金额", r => Number(r.amount || 0).toFixed(4)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
     }
@@ -129,8 +137,23 @@ def _safe_name(name: str) -> str:
     return candidate or "upload.dxf"
 
 
+def _review_notes(result: AnalysisResult) -> List[str]:
+    notes: List[str] = []
+    exact_region = bool(result.skipped_counts.get("exact_type:REGION"))
+    if result.profiles_all_count != result.profiles_used_count:
+        notes.append("检测到疑似重复轮廓，已按默认去重处理，请确认数量。")
+    if result.open_path_count:
+        notes.append("存在开放路径，请确认是否需要按切割路径报价。")
+    for warning in result.warnings:
+        if exact_region and "已从 ACIS 边界精确还原" in warning:
+            continue
+        if warning not in notes:
+            notes.append(warning)
+    return notes
+
+
 def _result_requires_review(result: AnalysisResult) -> bool:
-    return bool(result.warnings or result.skipped_counts or result.profiles_all_count != result.profiles_used_count)
+    return bool(_review_notes(result))
 
 
 def _status_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
@@ -146,8 +169,7 @@ def _status_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
             "open_path_count": result.open_path_count if result else 0,
             "open_path_length_m": result.open_path_length_m if result else 0,
             "quote_row_count": len(result.quote_rows) if result else 0,
-            "skipped_counts": result.skipped_counts if result else {},
-            "warnings": result.warnings if result else [],
+            "review_notes": _review_notes(result) if result else [],
             "error": item.error,
         })
     return rows
@@ -189,7 +211,7 @@ def _accuracy_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
         if not item.result.quote_rows:
             empty_count += 1
         open_path_length_m += item.result.open_path_length_m
-    return {"policy": "自动结果只能作为待确认报价；存在警告、跳过实体、重复视图或无报价行时必须人工复核。", "requires_review_count": review_count, "empty_result_count": empty_count, "open_path_length_m": round(open_path_length_m, 6), "supported_entities": ["LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ELLIPSE", "INSERT", "REGION_ACIS"], "unsupported_entities_action": "出现在 skipped_counts 中且没有 exact_type 标记的实体没有计入切割米数；POINT/VIEWPORT 不是切割轮廓，REGION 仅在 ACIS 边界可解码时参与计算。"}
+    return {"requires_review_count": review_count, "empty_result_count": empty_count, "open_path_length_m": round(open_path_length_m, 6)}
 
 
 def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) -> None:
