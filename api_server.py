@@ -189,7 +189,7 @@ def _accuracy_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
         if not item.result.quote_rows:
             empty_count += 1
         open_path_length_m += item.result.open_path_length_m
-    return {"policy": "自动结果只能作为待确认报价；存在警告、跳过实体、重复视图或无报价行时必须人工复核。", "requires_review_count": review_count, "empty_result_count": empty_count, "open_path_length_m": round(open_path_length_m, 6), "supported_entities": ["LINE", "ARC", "CIRCLE", "LWPOLYLINE", "SPLINE"], "unsupported_entities_action": "出现在 skipped_counts 中的实体没有计入切割米数，正式报价前必须回到 CAD 或预览页核对。"}
+    return {"policy": "自动结果只能作为待确认报价；存在警告、跳过实体、重复视图或无报价行时必须人工复核。", "requires_review_count": review_count, "empty_result_count": empty_count, "open_path_length_m": round(open_path_length_m, 6), "supported_entities": ["LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ELLIPSE", "INSERT"], "unsupported_entities_action": "出现在 skipped_counts 中的实体没有计入切割米数；REGION/POINT/VIEWPORT 不是可直接报价的切割轮廓，正式报价前必须回到 CAD 导出 1:1 边界曲线。"}
 
 
 def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) -> None:

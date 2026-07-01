@@ -785,8 +785,15 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     warnings: List[str] = []
     if skipped_counts.get("approx_type:SPLINE"):
         warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
+    if skipped_counts.get("unsupported_type:REGION"):
+        warnings.append("文件已打开，但检测到 REGION 面域实体；当前文件没有可直接报价的边界曲线。请在 CAD 中将面域分解/炸开为 LINE、ARC、LWPOLYLINE、SPLINE 等 1:1 切割轮廓后再上传。")
+    if skipped_counts.get("unsupported_type:POINT") and not segments and not circles:
+        warnings.append("文件只包含点、视口或面域等非切割曲线实体，无法计算切割长度、面积和重量。")
     if not profiles:
-        warnings.append("未识别到闭合外轮廓，请检查 DXF 是否为 1:1 展开切割图，或切割线是否在被过滤图层。")
+        if not segments and not circles:
+            warnings.append("未发现可用切割曲线实体；这不是报价参数问题，也不是文件未打开。")
+        else:
+            warnings.append("未识别到闭合外轮廓，请检查 DXF 是否为 1:1 展开切割图，或切割线是否在被过滤图层。")
         if open_components:
             warnings.append(f"已提取开放切割路径 {len(open_components)} 组，总长约 {sum(c.length_mm for c in open_components) / 1000.0:.4f} m；未生成正式报价行，需人工确认是否按开放路径报价。")
     profiles_all_count = len(profiles)

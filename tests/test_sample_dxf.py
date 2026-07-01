@@ -141,3 +141,25 @@ def test_ellipse_geometry_is_approximated(tmp_path: Path) -> None:
     assert result.basic_geometries[0].kind == "外轮廓"
     assert result.basic_geometries[0].area_mm2 > 3800
     assert result.skipped_counts["approx_type:ELLIPSE"] == 1
+
+
+def test_region_only_dxf_reports_actionable_warning(tmp_path: Path) -> None:
+    dxf = tmp_path / "region_only.dxf"
+    dxf.write_text(
+        "\n".join([
+            "0", "SECTION", "2", "ENTITIES",
+            "0", "POINT", "8", "CUT", "10", "0", "20", "0",
+            "0", "REGION", "8", "CUT",
+            "0", "VIEWPORT", "8", "CUT",
+            "0", "ENDSEC", "0", "EOF",
+        ]),
+        encoding="utf-8",
+    )
+
+    result = analyze_dxf(dxf, rates=QuoteRates(), dedupe_identical=True)
+
+    assert result.profiles_all_count == 0
+    assert result.basic_geometries == []
+    assert result.skipped_counts["unsupported_type:REGION"] == 1
+    assert any("文件已打开" in warning for warning in result.warnings)
+    assert any("未发现可用切割曲线实体" in warning for warning in result.warnings)
