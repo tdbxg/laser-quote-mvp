@@ -153,6 +153,10 @@ INDEX_HTML = """<!doctype html>
       const values = selectionInputs.map(input => Number(input.value));
       return values.every(Number.isFinite) && selectionInputs.every(input => input.value !== "") ? values : null;
     }
+    function pointPath(points) {
+      if (!points || points.length < 2) return "";
+      return points.map((p, i) => `${i ? "L" : "M"}${Number(p[0]).toFixed(4)},${Number(p[1]).toFixed(4)}`).join(" ");
+    }
     function drawPreview(rows) {
       previewRows = rows;
       if (!rows.length) { previewBox.innerHTML = ""; return; }
@@ -163,9 +167,19 @@ INDEX_HTML = """<!doctype html>
       const pad = Math.max(maxX - minX, maxY - minY) * 0.03 || 1;
       const view = [minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2];
       const current = selectedBbox();
-      const rects = bboxes.map(b => `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(0.001, b[2]-b[0])}" height="${Math.max(0.001, b[3]-b[1])}" fill="none" stroke="#34d399" stroke-width="${view[2] / 800}" vector-effect="non-scaling-stroke"></rect>`).join("");
+      const strokeWidth = Math.max(view[2], view[3]) / 1200;
+      const shapes = rows.map((r) => {
+        if (r.outer_points && r.outer_points.length > 1) {
+          const outer = `<path d="${pointPath(r.outer_points)}" fill="none" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></path>`;
+          const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path)}" fill="none" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></path>`).join("");
+          const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" fill="none" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></circle>`).join("");
+          return outer + inners + holes;
+        }
+        const b = r.bbox;
+        return `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(0.001, b[2]-b[0])}" height="${Math.max(0.001, b[3]-b[1])}" fill="none" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></rect>`;
+      }).join("");
       const selected = current ? `<rect id="selectionRect" x="${current[0]}" y="${current[1]}" width="${current[2]-current[0]}" height="${current[3]-current[1]}" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>` : `<rect id="selectionRect" x="0" y="0" width="0" height="0" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>`;
-      previewBox.innerHTML = `<svg id="previewSvg" viewBox="${view.join(" ")}" preserveAspectRatio="xMidYMid meet">${rects}${selected}</svg>`;
+      previewBox.innerHTML = `<svg id="previewSvg" viewBox="${view.join(" ")}" preserveAspectRatio="xMidYMid meet">${shapes}${selected}</svg>`;
       const svg = document.getElementById("previewSvg");
       const selectionRect = document.getElementById("selectionRect");
       previewState = { svg, view, selectionRect, start: null };
@@ -192,7 +206,7 @@ INDEX_HTML = """<!doctype html>
       const s = data.summary, isAnalyze = mode === "analyze";
       document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "总面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
       const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = reviewText(data);
-      drawPreview(data.geometry_rows || []);
+      drawPreview(data.preview_rows || data.geometry_rows || []);
       table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
       table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(4)], ["金额", r => Number(r.amount || 0).toFixed(4)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
@@ -270,6 +284,38 @@ def _geometry_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
             data = asdict(geometry)
             data["source_file"] = Path(item.source_file).name
             rows.append(data)
+    return rows
+
+
+def _rounded_point(point: Tuple[float, float]) -> Tuple[float, float]:
+    return round(point[0], 4), round(point[1], 4)
+
+
+def _sample_points(points: List[Tuple[float, float]], max_points: int = 80) -> List[Tuple[float, float]]:
+    if len(points) <= max_points:
+        return [_rounded_point(point) for point in points]
+    step = max(1, len(points) // max_points)
+    sampled = points[::step]
+    if sampled[-1] != points[-1]:
+        sampled.append(points[-1])
+    return [_rounded_point(point) for point in sampled]
+
+
+def _preview_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in batch.items:
+        if not item.result:
+            continue
+        source_file = Path(item.source_file).name
+        for preview in item.result.profile_previews:
+            rows.append({
+                "source_file": source_file,
+                "part_index": preview.part_index,
+                "bbox": tuple(round(value, 4) for value in preview.bbox),
+                "outer_points": _sample_points(preview.outer_points),
+                "inner_paths": [_sample_points(path, 50) for path in preview.inner_paths[:8]],
+                "hole_circles": [{key: round(value, 4) for key, value in circle.items()} for circle in preview.hole_circles[:40]],
+            })
     return rows
 
 
@@ -351,7 +397,7 @@ async def analyze(files: List[UploadFile] = File(...), select_min_x: Optional[fl
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     batch = analyze_dxf_batch(await _save_uploads(files, job_dir), rates=QuoteRates(), dedupe_identical=True, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
-    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": []}
+    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": []}
 
 
 @app.post("/api/quote")
@@ -373,7 +419,7 @@ async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"
     cut_m = sum(row.cut_length_m * row.quantity for row in batch.quote_rows)
     pierces = sum(row.pierce_count * row.quantity for row in batch.quote_rows)
     job_id = job_dir.name
-    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4)}, "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
+    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4)}, "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
 
 
 @app.get("/api/jobs/{job_id}/{filename}")
