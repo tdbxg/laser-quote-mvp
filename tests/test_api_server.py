@@ -24,8 +24,13 @@ def test_analyze_api_returns_geometry_without_pricing() -> None:
     data = response.json()
     assert data["summary"]["file_count"] == 1
     assert data["summary"]["total_profiles"] >= 1
+    assert data["summary"]["total_area_mm2"] > 0
     assert data["summary"]["quote_row_count"] == 0
     assert data["summary"]["total_amount"] == 0
+    assert data["geometry_rows"]
+    assert data["geometry_rows"][0]["area_mm2"] > 0
+    assert data["geometry_rows"][0]["perimeter_mm"] > 0
+    assert data["geometry_rows"][0]["centroid"] is not None
     assert data["quote_rows"] == []
     assert "downloads" not in data
 
