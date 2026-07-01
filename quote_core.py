@@ -1,25 +1,12 @@
-"""
-DXF 激光切割报价核算核心模块（MVP）
-
-功能：
-- 读取 ASCII DXF（支持常见 GBK/UTF-8 编码）
-- 过滤图框、文字、标注、中心线图层
-- 识别 LINE / ARC / CIRCLE / LWPOLYLINE / SPLINE 等 2D 切割几何
-- 自动识别外轮廓、内孔、重复视图
-- 计算外形尺寸、切割米数、孔数、穿孔数、净面积、毛面积、毛重、净重
-- 按报价参数计算单价和金额
-"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-import argparse
 import csv
 import json
 import math
 import re
-import sys
 
 KG_DENSITY_FACTOR = 1_000_000.0
 EXCLUDED_LAYER_KEYWORDS = ("图框", "标题", "标注", "文字", "中心", "辅助", "虚线", "DIM", "TEXT", "FRAME", "BORDER", "CENTER")
@@ -32,10 +19,6 @@ class Line:
     y1: float
     x2: float
     y2: float
-
-    @property
-    def type(self) -> str:
-        return "LINE"
 
     def endpoints(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         return (self.x1, self.y1), (self.x2, self.y2)
@@ -57,35 +40,28 @@ class Arc:
     start_deg: float
     end_deg: float
 
-    @property
-    def type(self) -> str:
-        return "ARC"
-
-    def _angle_span_deg(self) -> float:
+    def _span(self) -> float:
         span = self.end_deg - self.start_deg
         while span <= 0:
-            span += 360.0
+            span += 360
         return span
 
     def endpoints(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-        a1 = math.radians(self.start_deg)
-        a2 = math.radians(self.end_deg)
+        a1, a2 = math.radians(self.start_deg), math.radians(self.end_deg)
         return ((self.cx + self.r * math.cos(a1), self.cy + self.r * math.sin(a1)), (self.cx + self.r * math.cos(a2), self.cy + self.r * math.sin(a2)))
 
     def length(self) -> float:
-        return 2 * math.pi * self.r * self._angle_span_deg() / 360.0
+        return 2 * math.pi * self.r * self._span() / 360.0
 
     def points(self, reverse: bool = False, max_step_deg: float = 5.0) -> List[Tuple[float, float]]:
-        start = self.start_deg
         end = self.end_deg
-        while end <= start:
-            end += 360.0
-        steps = max(2, int(math.ceil((end - start) / max_step_deg)) + 1)
+        while end <= self.start_deg:
+            end += 360
+        steps = max(2, int(math.ceil((end - self.start_deg) / max_step_deg)) + 1)
         pts = []
         for i in range(steps):
-            a = start + (end - start) * i / (steps - 1)
-            ar = math.radians(a)
-            pts.append((self.cx + self.r * math.cos(ar), self.cy + self.r * math.sin(ar)))
+            a = math.radians(self.start_deg + (end - self.start_deg) * i / (steps - 1))
+            pts.append((self.cx + self.r * math.cos(a), self.cy + self.r * math.sin(a)))
         return list(reversed(pts)) if reverse else pts
 
 
@@ -96,10 +72,6 @@ class Circle:
     cy: float
     r: float
 
-    @property
-    def type(self) -> str:
-        return "CIRCLE"
-
     def length(self) -> float:
         return 2 * math.pi * self.r
 
@@ -108,65 +80,8 @@ class Circle:
 
 
 @dataclass
-class Polyline:
-    layer: str
-    points_xy: List[Tuple[float, float]]
-    closed: bool = False
-
-    @property
-    def type(self) -> str:
-        return "LWPOLYLINE"
-
-    def to_lines(self) -> List[Line]:
-        if len(self.points_xy) < 2:
-            return []
-        pts = self.points_xy + ([self.points_xy[0]] if self.closed else [])
-        return [Line(self.layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:])]
-
-
-PathEntity = Line | Arc
-
-
-def _de_boor_point(degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], t: float) -> Tuple[float, float]:
-    n = len(controls) - 1
-    if n < 0:
-        return (0.0, 0.0)
-    if t >= knots[n + 1]:
-        return controls[-1]
-    k = degree
-    for i in range(degree, n + 1):
-        if knots[i] <= t < knots[i + 1]:
-            k = i
-            break
-    d = [controls[j] for j in range(k - degree, k + 1)]
-    for r in range(1, degree + 1):
-        for j in range(degree, r - 1, -1):
-            left = knots[k - degree + j]
-            right = knots[k + 1 + j - r]
-            denom = right - left
-            alpha = 0.0 if abs(denom) < 1e-12 else (t - left) / denom
-            d[j] = ((1 - alpha) * d[j - 1][0] + alpha * d[j][0], (1 - alpha) * d[j - 1][1] + alpha * d[j][1])
-    return d[degree]
-
-
-def spline_to_lines(layer: str, degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], flags: int = 0, samples_per_span: int = 18) -> List[Line]:
-    if degree < 1 or len(controls) <= degree or len(knots) < len(controls) + degree + 1:
-        return []
-    start = knots[degree]
-    end = knots[len(controls)]
-    if end <= start:
-        return []
-    span_count = max(1, len({round(k, 9) for k in knots if start < k < end}) + 1)
-    sample_count = max(16, span_count * samples_per_span)
-    pts = [_de_boor_point(degree, knots, controls, start + (end - start) * i / sample_count) for i in range(sample_count + 1)]
-    if flags & 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > 0.01:
-        pts.append(pts[0])
-    return [Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-9]
-
-
-@dataclass
 class PathComponent:
-    segments: List[PathEntity]
+    segments: List[Line | Arc]
     points: List[Tuple[float, float]]
     length_mm: float
     area_mm2: float
@@ -184,13 +99,11 @@ class PartProfile:
 
     @property
     def width_mm(self) -> float:
-        x1, _, x2, _ = self.outer.bbox
-        return x2 - x1
+        return self.outer.bbox[2] - self.outer.bbox[0]
 
     @property
     def height_mm(self) -> float:
-        _, y1, _, y2 = self.outer.bbox
-        return y2 - y1
+        return self.outer.bbox[3] - self.outer.bbox[1]
 
     @property
     def outer_area_mm2(self) -> float:
@@ -210,7 +123,7 @@ class PartProfile:
 
     @property
     def cut_length_mm(self) -> float:
-        return self.outer.length_mm + sum(h.length() for h in self.holes) + sum(h.length_mm for h in self.inner_paths)
+        return self.outer.length_mm + sum(h.length() for h in self.holes) + sum(p.length_mm for p in self.inner_paths)
 
     @property
     def hole_count(self) -> int:
@@ -222,9 +135,7 @@ class PartProfile:
 
     def signature(self) -> Tuple[Any, ...]:
         minx, miny, _, _ = self.outer.bbox
-        hole_sig = sorted((round(h.cx - minx, 1), round(h.cy - miny, 1), round(h.r, 1)) for h in self.holes)
-        inner_sig = sorted((round(p.area_mm2, 1), round(p.length_mm, 1)) for p in self.inner_paths)
-        return (round(self.width_mm, 1), round(self.height_mm, 1), round(self.outer_area_mm2, 0), round(self.outer.length_mm, 1), tuple(hole_sig), tuple(inner_sig))
+        return (round(self.width_mm, 1), round(self.height_mm, 1), round(self.outer_area_mm2, 0), round(self.outer.length_mm, 1), tuple(sorted((round(h.cx - minx, 1), round(h.cy - miny, 1), round(h.r, 1)) for h in self.holes)), tuple(sorted((round(p.area_mm2, 1), round(p.length_mm, 1)) for p in self.inner_paths)))
 
 
 @dataclass
@@ -241,6 +152,7 @@ class QuoteRates:
     profit_rate: float = 0.0
     tax_rate: float = 0.0
     min_charge_each: float = 0.0
+    quote_open_paths: bool = False
 
 
 @dataclass
@@ -292,6 +204,26 @@ class ProfilePreview:
 
 
 @dataclass
+class BasicGeometry:
+    geometry_index: int
+    kind: str
+    closed: bool
+    approximate: bool
+    area_mm2: float
+    perimeter_mm: float
+    bbox: Tuple[float, float, float, float]
+    width_mm: float
+    height_mm: float
+    centroid: Optional[Tuple[float, float]]
+    inertia_centroid_x_mm4: Optional[float]
+    inertia_centroid_y_mm4: Optional[float]
+    inertia_centroid_xy_mm4: Optional[float]
+    radius_gyration_x_mm: Optional[float]
+    radius_gyration_y_mm: Optional[float]
+    note: str = ""
+
+
+@dataclass
 class AnalysisResult:
     source_file: str
     drawing_no: str = ""
@@ -305,6 +237,7 @@ class AnalysisResult:
     open_path_count: int = 0
     open_path_length_m: float = 0.0
     geometry_bbox: Optional[Tuple[float, float, float, float]] = None
+    basic_geometries: List[BasicGeometry] = field(default_factory=list)
     duplicate_groups: List[int] = field(default_factory=list)
     profile_previews: List[ProfilePreview] = field(default_factory=list)
     quote_rows: List[QuoteRow] = field(default_factory=list)
@@ -346,17 +279,17 @@ class BatchAnalysisResult:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
 
 
-def _decode_dxf(raw: bytes) -> str:
+def _decode(raw: bytes) -> str:
     for enc in ("utf-8-sig", "gb18030", "cp936", "latin1"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
-            continue
+            pass
     return raw.decode("latin1", errors="replace")
 
 
 def read_dxf_pairs(path: str | Path) -> List[Tuple[str, str]]:
-    lines = _decode_dxf(Path(path).read_bytes()).splitlines()
+    lines = _decode(Path(path).read_bytes()).splitlines()
     return [(lines[i].strip(), lines[i + 1].strip()) for i in range(0, len(lines) - 1, 2)]
 
 
@@ -384,11 +317,11 @@ def iter_dxf_entities(pairs: Sequence[Tuple[str, str]], section_name: Optional[s
 
 
 def _last(data: List[Tuple[str, str]], code: str, default: str = "") -> str:
-    found = default
+    out = default
     for c, v in data:
         if c == code:
-            found = v
-    return found
+            out = v
+    return out
 
 
 def _floats(data: List[Tuple[str, str]], code: str) -> List[float]:
@@ -418,30 +351,24 @@ def _int(data: List[Tuple[str, str]], code: str, default: int = 0) -> int:
 
 def clean_text(s: str) -> str:
     s = s.replace("\\P", " ").replace("\\~", " ")
-    s = re.sub(r"\\[A-Za-z]+\d*;?", "", s)
-    s = s.replace("{", "").replace("}", "")
+    s = re.sub(r"\\[A-Za-z]+\d*;?", "", s).replace("{", "").replace("}", "")
     return re.sub(r"\s+", " ", s).strip()
 
 
 def extract_all_texts(pairs: Sequence[Tuple[str, str]]) -> List[str]:
     texts: List[str] = []
-    for ent_type, data in iter_dxf_entities(pairs, section_name=None):
+    for ent_type, data in iter_dxf_entities(pairs, None):
         if ent_type in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
-            s = clean_text("".join(v for c, v in data if c in {"1", "3"}))
-            if s:
-                texts.append(s)
-    seen = set()
-    unique = []
-    for t in texts:
-        if t not in seen:
-            unique.append(t)
-            seen.add(t)
-    return unique
+            value = clean_text("".join(v for c, v in data if c in {"1", "3"}))
+            if value and value not in texts:
+                texts.append(value)
+    return texts
 
 
 def infer_metadata(texts: Sequence[str]) -> Tuple[str, str, str]:
     drawing_no = ""
     material = ""
+    name = ""
     for t in texts:
         compact = t.replace(" ", "")
         if not drawing_no and re.search(r"[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+", compact, re.I):
@@ -453,14 +380,8 @@ def infer_metadata(texts: Sequence[str]) -> Tuple[str, str, str]:
                 material = "铝板"
             elif "不锈钢" in compact or "304" in compact:
                 material = "不锈钢"
-    candidates = []
-    for t in texts:
-        compact = t.replace(" ", "")
-        if not compact or not re.search(r"[\u4e00-\u9fff]", compact):
-            continue
-        if any(ch in compact for ch in ("板", "座", "钩", "梁", "架", "件", "盖", "支")):
-            candidates.append((2 if len(compact) <= 16 else 0, compact))
-    name = max(candidates, default=(0, ""), key=lambda x: x[0])[1]
+        if not name and re.search(r"[\u4e00-\u9fff]", compact) and any(ch in compact for ch in "板座钩梁架件盖支"):
+            name = compact
     return drawing_no, name, material
 
 
@@ -469,15 +390,47 @@ def layer_excluded(layer: str, extra_keywords: Sequence[str] = ()) -> bool:
     return any(k.upper() in u for k in tuple(EXCLUDED_LAYER_KEYWORDS) + tuple(extra_keywords))
 
 
-def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = ()) -> Tuple[List[PathEntity], List[Circle], Dict[str, int], Dict[str, int]]:
+def _de_boor_point(degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], t: float) -> Tuple[float, float]:
+    n = len(controls) - 1
+    if t >= knots[n + 1]:
+        return controls[-1]
+    k = degree
+    for i in range(degree, n + 1):
+        if knots[i] <= t < knots[i + 1]:
+            k = i
+            break
+    d = [controls[j] for j in range(k - degree, k + 1)]
+    for r in range(1, degree + 1):
+        for j in range(degree, r - 1, -1):
+            left, right = knots[k - degree + j], knots[k + 1 + j - r]
+            alpha = 0.0 if abs(right - left) < 1e-12 else (t - left) / (right - left)
+            d[j] = ((1 - alpha) * d[j - 1][0] + alpha * d[j][0], (1 - alpha) * d[j - 1][1] + alpha * d[j][1])
+    return d[degree]
+
+
+def spline_to_lines(layer: str, degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], flags: int = 0, samples_per_span: int = 60) -> List[Line]:
+    if degree < 1 or len(controls) <= degree or len(knots) < len(controls) + degree + 1:
+        return []
+    start, end = knots[degree], knots[len(controls)]
+    if end <= start:
+        return []
+    span_count = max(1, len({round(k, 9) for k in knots if start < k < end}) + 1)
+    sample_count = max(16, span_count * samples_per_span)
+    pts = [_de_boor_point(degree, knots, controls, start + (end - start) * i / sample_count) for i in range(sample_count + 1)]
+    if flags & 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > 0.01:
+        pts.append(pts[0])
+    return [Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-9]
+
+
+def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = ()) -> Tuple[List[Line | Arc], List[Circle], Dict[str, int], Dict[str, int]]:
     include_set = set(include_layers or [])
-    segments: List[PathEntity] = []
+    segments: List[Line | Arc] = []
     circles: List[Circle] = []
     layer_counts: Dict[str, int] = {}
-    skipped_counts: Dict[str, int] = {}
+    skipped: Dict[str, int] = {}
 
     def skip(reason: str) -> None:
-        skipped_counts[reason] = skipped_counts.get(reason, 0) + 1
+        skipped[reason] = skipped.get(reason, 0) + 1
 
     for ent_type, data in iter_dxf_entities(pairs, "ENTITIES"):
         layer = _last(data, "8", "")
@@ -498,10 +451,12 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
                 circles.append(Circle(layer, _float(data, "10"), _float(data, "20"), r))
         elif ent_type == "LWPOLYLINE":
             pts = list(zip(_floats(data, "10"), _floats(data, "20")))
-            closed = (_int(data, "70") & 1) == 1
-            segments.extend(Polyline(layer, pts, closed).to_lines())
+            if len(pts) >= 2:
+                if _int(data, "70") & 1:
+                    pts.append(pts[0])
+                segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
         elif ent_type == "SPLINE":
-            lines = spline_to_lines(layer, _int(data, "71", 3), _floats(data, "40"), list(zip(_floats(data, "10"), _floats(data, "20"))), flags=_int(data, "70", 0))
+            lines = spline_to_lines(layer, _int(data, "71", 3), _floats(data, "40"), list(zip(_floats(data, "10"), _floats(data, "20"))), _int(data, "70", 0))
             if lines:
                 segments.extend(lines)
                 skip("approx_type:SPLINE")
@@ -509,7 +464,7 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
                 skip("unsupported_type:SPLINE")
         else:
             skip(f"skip_type:{ent_type}" if ent_type in {"TEXT", "MTEXT", "DIMENSION", "INSERT", "HATCH"} else f"unsupported_type:{ent_type}")
-    return segments, circles, layer_counts, skipped_counts
+    return segments, circles, layer_counts, skipped
 
 
 def point_key(pt: Tuple[float, float], tol: float = 0.01) -> Tuple[int, int]:
@@ -517,20 +472,43 @@ def point_key(pt: Tuple[float, float], tol: float = 0.01) -> Tuple[int, int]:
 
 
 def shoelace_area(points: Sequence[Tuple[float, float]]) -> float:
-    if len(points) < 3:
-        return 0.0
     pts = list(points)
+    if len(pts) < 3:
+        return 0.0
     if pts[0] != pts[-1]:
         pts.append(pts[0])
-    area = 0.0
-    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
-        area += x1 * y2 - x2 * y1
-    return abs(area) / 2.0
+    return abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(pts, pts[1:]))) / 2.0
+
+
+def polygon_mass_properties(points: Sequence[Tuple[float, float]]) -> Dict[str, Optional[float]]:
+    pts = list(points)
+    if len(pts) < 3:
+        return {"area": 0.0, "cx": None, "cy": None, "ix_c": None, "iy_c": None, "ixy_c": None, "rx": None, "ry": None}
+    if pts[0] != pts[-1]:
+        pts.append(pts[0])
+    twice_area = cx_acc = cy_acc = ix_acc = iy_acc = ixy_acc = 0.0
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        cross = x0 * y1 - x1 * y0
+        twice_area += cross
+        cx_acc += (x0 + x1) * cross
+        cy_acc += (y0 + y1) * cross
+        ix_acc += (y0 * y0 + y0 * y1 + y1 * y1) * cross
+        iy_acc += (x0 * x0 + x0 * x1 + x1 * x1) * cross
+        ixy_acc += (2 * x0 * y0 + x0 * y1 + x1 * y0 + 2 * x1 * y1) * cross
+    signed_area = twice_area / 2.0
+    if abs(signed_area) < 1e-9:
+        return {"area": 0.0, "cx": None, "cy": None, "ix_c": None, "iy_c": None, "ixy_c": None, "rx": None, "ry": None}
+    cx = cx_acc / (6.0 * signed_area)
+    cy = cy_acc / (6.0 * signed_area)
+    area = abs(signed_area)
+    ix_c = abs(ix_acc / 12.0 - signed_area * cy * cy)
+    iy_c = abs(iy_acc / 12.0 - signed_area * cx * cx)
+    ixy_c = ixy_acc / 24.0 - signed_area * cx * cy
+    return {"area": area, "cx": cx, "cy": cy, "ix_c": ix_c, "iy_c": iy_c, "ixy_c": ixy_c, "rx": math.sqrt(ix_c / area), "ry": math.sqrt(iy_c / area)}
 
 
 def bbox_of_points(points: Sequence[Tuple[float, float]]) -> Tuple[float, float, float, float]:
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
     return min(xs), min(ys), max(xs), max(ys)
 
 
@@ -538,47 +516,36 @@ def point_in_polygon(pt: Tuple[float, float], polygon: Sequence[Tuple[float, flo
     x, y = pt
     inside = False
     pts = list(polygon)
-    if not pts:
-        return False
-    if pts[0] != pts[-1]:
+    if pts and pts[0] != pts[-1]:
         pts.append(pts[0])
     for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
         if (y1 > y) != (y2 > y):
-            xinters = (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-12) + x1
-            if x < xinters:
+            if x < (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-12) + x1:
                 inside = not inside
     return inside
 
 
-def order_component_points(segments: List[PathEntity], tol: float = 0.05) -> List[Tuple[float, float]]:
-    if not segments:
-        return []
+def order_component_points(segments: List[Line | Arc], tol: float = 0.05) -> List[Tuple[float, float]]:
     endpoints = [seg.endpoints() for seg in segments]
     keys = [(point_key(a, tol), point_key(b, tol)) for a, b in endpoints]
     adjacency: Dict[Tuple[int, int], List[int]] = {}
     for i, (ka, kb) in enumerate(keys):
         adjacency.setdefault(ka, []).append(i)
         adjacency.setdefault(kb, []).append(i)
-    current_key = keys[0][0]
+    current = keys[0][0]
     used = set()
     pts: List[Tuple[float, float]] = []
     for _ in range(len(segments)):
-        candidates = [idx for idx in adjacency.get(current_key, []) if idx not in used]
+        candidates = [idx for idx in adjacency.get(current, []) if idx not in used]
         if not candidates:
-            break
+            return []
         idx = candidates[0]
         used.add(idx)
         ka, kb = keys[idx]
-        seg = segments[idx]
-        if current_key == ka:
-            next_key = kb
-            reverse = False
-        else:
-            next_key = ka
-            reverse = True
-        seg_pts = seg.points(reverse=reverse)
+        reverse = current != ka
+        seg_pts = segments[idx].points(reverse=reverse)
         pts.extend(seg_pts[1:] if pts else seg_pts)
-        current_key = next_key
+        current = ka if reverse else kb
     if len(used) != len(segments):
         return []
     if pts and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > tol:
@@ -586,7 +553,7 @@ def order_component_points(segments: List[PathEntity], tol: float = 0.05) -> Lis
     return pts
 
 
-def build_closed_components(segments: List[PathEntity], tol: float = 0.05) -> List[PathComponent]:
+def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> List[PathComponent]:
     parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
 
     def find(a: Tuple[int, int]) -> Tuple[int, int]:
@@ -620,27 +587,27 @@ def build_closed_components(segments: List[PathEntity], tol: float = 0.05) -> Li
             degree[k1] = degree.get(k1, 0) + 1
             degree[k2] = degree.get(k2, 0) + 1
         closed = bool(degree) and all(v == 2 for v in degree.values())
-        ordered_points = order_component_points([segments[i] for i in seg_indices], tol=tol) if closed else []
-        if not ordered_points:
-            ordered_points = [pt for i in seg_indices for pt in segments[i].points()]
-        result.append(PathComponent([segments[i] for i in seg_indices], ordered_points, sum(segments[i].length() for i in seg_indices), shoelace_area(ordered_points) if closed else 0.0, bbox_of_points(ordered_points), closed))
+        ordered = order_component_points([segments[i] for i in seg_indices], tol) if closed else []
+        if not ordered:
+            ordered = [pt for i in seg_indices for pt in segments[i].points()]
+        length = sum(segments[i].length() for i in seg_indices)
+        result.append(PathComponent([segments[i] for i in seg_indices], ordered, length, shoelace_area(ordered) if closed else 0.0, bbox_of_points(ordered), closed))
     return result
 
 
-def assign_profiles(segments: List[PathEntity], circles: List[Circle], min_outer_area_mm2: float = 1000.0) -> List[PartProfile]:
-    comps = build_closed_components(segments)
-    closed = [c for c in comps if c.closed and c.area_mm2 > 1]
+def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer_area_mm2: float = 1000.0) -> List[PartProfile]:
+    closed = [c for c in build_closed_components(segments) if c.closed and c.area_mm2 > 1]
     outers = sorted([c for c in closed if c.area_mm2 >= min_outer_area_mm2], key=lambda c: c.area_mm2, reverse=True)
     profiles = [PartProfile(i + 1, outer=o) for i, o in enumerate(outers)]
     for circle in circles:
-        candidates = [profile for profile in profiles if point_in_polygon((circle.cx, circle.cy), profile.outer.points)]
+        candidates = [p for p in profiles if point_in_polygon((circle.cx, circle.cy), p.outer.points)]
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).holes.append(circle)
     for comp in closed:
         if comp in outers:
             continue
         center = ((comp.bbox[0] + comp.bbox[2]) / 2, (comp.bbox[1] + comp.bbox[3]) / 2)
-        candidates = [profile for profile in profiles if point_in_polygon(center, profile.outer.points)]
+        candidates = [p for p in profiles if point_in_polygon(center, p.outer.points)]
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).inner_paths.append(comp)
     return profiles
@@ -650,8 +617,8 @@ def deduplicate_profiles(profiles: List[PartProfile]) -> Tuple[List[PartProfile]
     groups: Dict[Tuple[Any, ...], List[PartProfile]] = {}
     for p in profiles:
         groups.setdefault(p.signature(), []).append(p)
-    used = []
-    sizes = []
+    used: List[PartProfile] = []
+    sizes: List[int] = []
     for items in groups.values():
         first = items[0]
         first.duplicate_count = len(items)
@@ -665,6 +632,23 @@ def make_profile_preview(profile: PartProfile, selected_by_default: bool) -> Pro
     return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_mm / 1000.0, profile.gross_area_mm2, profile.net_area_mm2)
 
 
+def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, float]], perimeter_mm: float, bbox: Tuple[float, float, float, float], closed: bool, approximate: bool, note: str) -> BasicGeometry:
+    props = polygon_mass_properties(points) if closed else {"area": 0.0, "cx": None, "cy": None, "ix_c": None, "iy_c": None, "ixy_c": None, "rx": None, "ry": None}
+    centroid = None if props["cx"] is None or props["cy"] is None else (float(props["cx"]), float(props["cy"]))
+    return BasicGeometry(index, kind, closed, approximate, float(props["area"] or 0.0), perimeter_mm, bbox, bbox[2] - bbox[0], bbox[3] - bbox[1], centroid, None if props["ix_c"] is None else float(props["ix_c"]), None if props["iy_c"] is None else float(props["iy_c"]), None if props["ixy_c"] is None else float(props["ixy_c"]), None if props["rx"] is None else float(props["rx"]), None if props["ry"] is None else float(props["ry"]), note)
+
+
+def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequence[PathComponent]) -> List[BasicGeometry]:
+    out: List[BasicGeometry] = []
+    for profile in profiles:
+        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.outer.length_mm, profile.outer.bbox, True, False, "已识别为闭合外轮廓"))
+    for component in open_components:
+        gap = math.hypot(component.points[0][0] - component.points[-1][0], component.points[0][1] - component.points[-1][1]) if len(component.points) >= 2 else 999
+        near_closed = len(component.points) >= 3 and gap <= 0.5 and shoelace_area(component.points) > 1
+        out.append(make_basic_geometry(len(out) + 1, "近似闭合路径" if near_closed else "开放路径", component.points, component.length_mm, component.bbox, near_closed, True, "端点接近闭合，按面域近似提取；正式报价前请人工确认轮廓有效性" if near_closed else "开放切割路径，不能直接计算材料面积"))
+    return out
+
+
 def calc_quote_row(profile: PartProfile, rates: QuoteRates, drawing_no: str = "", name: str = "") -> QuoteRow:
     gross_w = profile.gross_area_mm2 * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
     net_w = profile.net_area_mm2 * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
@@ -672,11 +656,10 @@ def calc_quote_row(profile: PartProfile, rates: QuoteRates, drawing_no: str = ""
     cut_fee = cut_m * rates.cut_price_per_meter
     pierce_fee = profile.pierce_count * rates.pierce_price_each
     material_fee = gross_w * rates.material_price_per_kg
-    scrap_credit = max(0.0, gross_w - net_w) * rates.scrap_price_per_kg
+    scrap_credit = max(gross_w - net_w, 0) * rates.scrap_price_per_kg
     base = material_fee - scrap_credit + cut_fee + pierce_fee + rates.other_process_fee_each
     price = max(rates.min_charge_each, base * (1 + rates.profit_rate) * (1 + rates.tax_rate))
-    amount = price * rates.quantity
-    return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, profile.net_area_mm2, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, amount, "检测到重复视图，已按单件去重" if profile.duplicate_count > 1 else "")
+    return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, profile.net_area_mm2, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, price * rates.quantity, "检测到重复视图，已按单件去重" if profile.duplicate_count > 1 else "")
 
 
 def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None) -> AnalysisResult:
@@ -684,39 +667,34 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     path = Path(path)
     pairs = read_dxf_pairs(path)
     texts = extract_all_texts(pairs)
-    drawing_no, inferred_name, material_hint = infer_metadata(texts)
-    if material_hint and rates.material == "auto":
-        rates.material = material_hint
+    drawing_no, name, material_hint = infer_metadata(texts)
     segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers)
     components = build_closed_components(segments)
     open_components = [c for c in components if not c.closed]
     all_points = [pt for segment in segments for pt in segment.points()]
     geometry_bbox = bbox_of_points(all_points) if all_points else None
     profiles = assign_profiles(segments, circles)
-    warnings = []
+    warnings: List[str] = []
     if not profiles:
         warnings.append("未识别到闭合外轮廓，请检查 DXF 是否为 1:1 展开切割图，或切割线是否在被过滤图层。")
         if open_components:
             warnings.append(f"已提取开放切割路径 {len(open_components)} 组，总长约 {sum(c.length_mm for c in open_components) / 1000.0:.4f} m；未生成正式报价行，需人工确认是否按开放路径报价。")
     profiles_all_count = len(profiles)
-    if dedupe_identical:
-        profiles_used, duplicate_groups = deduplicate_profiles(profiles)
-    else:
-        profiles_used, duplicate_groups = profiles, [1 for _ in profiles]
+    profiles_used, duplicate_groups = deduplicate_profiles(profiles) if dedupe_identical else (profiles, [1 for _ in profiles])
     if any(n > 1 for n in duplicate_groups):
         warnings.append("检测到疑似重复视图，系统默认按几何相同零件去重；报价前请人工确认数量。")
-    used_profile_indices = {p.index for p in profiles_used}
-    return AnalysisResult(str(path), drawing_no, inferred_name, material_hint, texts, layer_counts, skipped_counts, profiles_all_count, len(profiles_used), len(open_components), sum(c.length_mm for c in open_components) / 1000.0, geometry_bbox, duplicate_groups, [make_profile_preview(profile, profile.index in used_profile_indices) for profile in profiles], [calc_quote_row(p, rates, drawing_no=drawing_no, name=inferred_name) for p in profiles_used], warnings)
+    used = {p.index for p in profiles_used}
+    previews = [make_profile_preview(p, p.index in used) for p in profiles]
+    basics = make_basic_geometries(profiles, open_components)
+    rows = [calc_quote_row(p, rates, drawing_no, name) for p in profiles_used]
+    return AnalysisResult(str(path), drawing_no, name, material_hint, texts, layer_counts, skipped_counts, profiles_all_count, len(profiles_used), len(open_components), sum(c.length_mm for c in open_components) / 1000.0, geometry_bbox, basics, duplicate_groups, previews, rows, warnings)
 
 
 def collect_dxf_paths(paths: Sequence[str | Path]) -> List[Path]:
-    out = []
+    out: List[Path] = []
     for raw in paths:
         path = Path(raw)
-        if path.is_dir():
-            out.extend(sorted(p for p in path.iterdir() if p.suffix.lower() == ".dxf"))
-        else:
-            out.append(path)
+        out.extend(sorted(p for p in path.iterdir() if p.suffix.lower() == ".dxf")) if path.is_dir() else out.append(path)
     return out
 
 
@@ -724,18 +702,10 @@ def analyze_dxf_batch(paths: Sequence[str | Path], rates: Optional[QuoteRates] =
     batch = BatchAnalysisResult()
     for path in collect_dxf_paths(paths):
         try:
-            batch.items.append(BatchItemResult(str(path), True, analyze_dxf(path, rates=rates, dedupe_identical=dedupe_identical, include_layers=include_layers)))
+            batch.items.append(BatchItemResult(str(path), True, analyze_dxf(path, rates, dedupe_identical, include_layers)))
         except Exception as exc:
             batch.items.append(BatchItemResult(str(path), False, error=str(exc)))
     return batch
-
-
-def load_rates(path: Optional[str | Path], overrides: Dict[str, Any]) -> QuoteRates:
-    data: Dict[str, Any] = {}
-    if path:
-        data.update(json.loads(Path(path).read_text(encoding="utf-8")))
-    data.update({k: v for k, v in overrides.items() if v is not None})
-    return QuoteRates(**data)
 
 
 def write_csv(result: AnalysisResult, out_path: str | Path) -> None:
@@ -745,8 +715,7 @@ def write_csv(result: AnalysisResult, out_path: str | Path) -> None:
         return
     with Path(out_path).open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+        writer.writeheader(); writer.writerows(rows)
 
 
 def write_batch_csv(batch: BatchAnalysisResult, out_path: str | Path) -> None:
@@ -754,11 +723,7 @@ def write_batch_csv(batch: BatchAnalysisResult, out_path: str | Path) -> None:
     for item in batch.items:
         if item.result and item.result.quote_rows:
             for row in item.result.quote_rows:
-                data = row.as_dict()
-                data["source_file"] = item.source_file
-                data["status"] = "ok"
-                data["warnings"] = "；".join(item.result.warnings)
-                rows.append(data)
+                data = row.as_dict(); data["source_file"] = item.source_file; data["status"] = "ok"; data["warnings"] = "；".join(item.result.warnings); rows.append(data)
         else:
             rows.append({"source_file": item.source_file, "status": "error" if not item.ok else "empty", "error": item.error})
     if not rows:
@@ -771,21 +736,4 @@ def write_batch_csv(batch: BatchAnalysisResult, out_path: str | Path) -> None:
                 fieldnames.append(key)
     with Path(out_path).open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="DXF 激光切割报价核算 MVP")
-    parser.add_argument("dxf", nargs="+")
-    parser.add_argument("--csv", default=None)
-    args = parser.parse_args(argv)
-    result = analyze_dxf(args.dxf[0])
-    print(result.to_json())
-    if args.csv:
-        write_csv(result, args.csv)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+        writer.writeheader(); writer.writerows(rows)
