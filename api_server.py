@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +57,10 @@ INDEX_HTML = """<!doctype html>
     .metric b { display: block; font-size: 22px; margin-top: 4px; }
     .warn { background: #fffbeb; border-color: #f59e0b; }
     .ok { background: #ecfdf5; border-color: #10b981; }
+    .preview-box { background: #111827; border-radius: 8px; height: 360px; margin-top: 12px; overflow: hidden; position: relative; }
+    .preview-box svg { display: block; height: 100%; width: 100%; }
+    .preview-actions { align-items: center; display: flex; gap: 12px; margin-top: 10px; }
+    .secondary { background: #4b5563; }
     .table-wrap { overflow-x: auto; }
     table { border-collapse: collapse; min-width: 980px; width: 100%; }
     th, td { border-bottom: 1px solid #e5e7eb; font-size: 13px; padding: 10px 8px; text-align: left; vertical-align: top; }
@@ -73,6 +77,10 @@ INDEX_HTML = """<!doctype html>
     <section class="panel">
       <form id="quoteForm">
         <div class="grid"><label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label></div>
+        <input name="select_min_x" type="hidden" />
+        <input name="select_min_y" type="hidden" />
+        <input name="select_max_x" type="hidden" />
+        <input name="select_max_y" type="hidden" />
         <div class="actions"><button id="analyzeBtn" type="button">1. 提取 DXF 信息</button><span id="message" class="muted"></span></div>
         <div id="pricingFields" style="display:none">
           <p class="hint">先确认下方 DXF 基础信息，再修改报价参数并计算金额。</p>
@@ -96,6 +104,7 @@ INDEX_HTML = """<!doctype html>
     </section>
     <section id="result" style="display:none">
       <section class="panel"><h2>汇总</h2><div id="summary" class="summary"></div></section>
+      <section class="panel"><h2>图纸预览</h2><p class="hint">拖拽框选有效切割区域后，再次点击“提取 DXF 信息”或“计算待确认报价”。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
       <section id="accuracyPanel" class="panel"><h2>复核提示</h2><p id="accuracyText"></p></section>
       <section class="panel"><h2>基础几何信息</h2><div class="table-wrap"><table id="geometryTable"></table></div></section>
       <section class="panel"><h2>报价明细</h2><div class="table-wrap"><table id="quoteTable"></table></div></section>
@@ -109,6 +118,11 @@ INDEX_HTML = """<!doctype html>
     const result = document.getElementById("result");
     const downloads = document.getElementById("downloadLinks");
     const pricingFields = document.getElementById("pricingFields");
+    const previewBox = document.getElementById("previewBox");
+    const selectionText = document.getElementById("selectionText");
+    const selectionInputs = ["select_min_x", "select_min_y", "select_max_x", "select_max_y"].map(name => form.elements[name]);
+    let previewState = null;
+    let previewRows = [];
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     function table(el, headers, rows) { const body = rows.length ? rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") : `<tr><td colspan="${headers.length}">暂无可显示数据。</td></tr>`; el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" + body + "</tbody>"; }
     function reviewText(data) {
@@ -131,17 +145,62 @@ INDEX_HTML = """<!doctype html>
       if (!res.ok) throw new Error(data.detail || fallback);
       return data;
     }
+    function setSelection(bbox) {
+      selectionInputs.forEach((input, i) => { input.disabled = !bbox; input.value = bbox ? Number(bbox[i]).toFixed(6) : ""; });
+      selectionText.textContent = bbox ? `已框选：${bbox.map(v => Number(v).toFixed(2)).join(" , ")}` : "";
+    }
+    function selectedBbox() {
+      const values = selectionInputs.map(input => Number(input.value));
+      return values.every(Number.isFinite) && selectionInputs.every(input => input.value !== "") ? values : null;
+    }
+    function drawPreview(rows) {
+      previewRows = rows;
+      if (!rows.length) { previewBox.innerHTML = ""; return; }
+      const bboxes = rows.map(r => r.bbox).filter(b => Array.isArray(b) && b.length === 4);
+      if (!bboxes.length) { previewBox.innerHTML = ""; return; }
+      const minX = Math.min(...bboxes.map(b => b[0])), minY = Math.min(...bboxes.map(b => b[1]));
+      const maxX = Math.max(...bboxes.map(b => b[2])), maxY = Math.max(...bboxes.map(b => b[3]));
+      const pad = Math.max(maxX - minX, maxY - minY) * 0.03 || 1;
+      const view = [minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2];
+      const current = selectedBbox();
+      const rects = bboxes.map(b => `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(0.001, b[2]-b[0])}" height="${Math.max(0.001, b[3]-b[1])}" fill="none" stroke="#34d399" stroke-width="${view[2] / 800}" vector-effect="non-scaling-stroke"></rect>`).join("");
+      const selected = current ? `<rect id="selectionRect" x="${current[0]}" y="${current[1]}" width="${current[2]-current[0]}" height="${current[3]-current[1]}" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>` : `<rect id="selectionRect" x="0" y="0" width="0" height="0" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>`;
+      previewBox.innerHTML = `<svg id="previewSvg" viewBox="${view.join(" ")}" preserveAspectRatio="xMidYMid meet">${rects}${selected}</svg>`;
+      const svg = document.getElementById("previewSvg");
+      const selectionRect = document.getElementById("selectionRect");
+      previewState = { svg, view, selectionRect, start: null };
+      const point = (event) => {
+        const pt = svg.createSVGPoint(); pt.x = event.clientX; pt.y = event.clientY;
+        const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+        return [p.x, p.y];
+      };
+      svg.addEventListener("pointerdown", event => { previewState.start = point(event); svg.setPointerCapture(event.pointerId); });
+      svg.addEventListener("pointermove", event => {
+        if (!previewState.start) return;
+        const p = point(event), x1 = Math.min(previewState.start[0], p[0]), x2 = Math.max(previewState.start[0], p[0]), y1 = Math.min(previewState.start[1], p[1]), y2 = Math.max(previewState.start[1], p[1]);
+        selectionRect.setAttribute("x", x1); selectionRect.setAttribute("y", y1); selectionRect.setAttribute("width", x2 - x1); selectionRect.setAttribute("height", y2 - y1);
+      });
+      svg.addEventListener("pointerup", event => {
+        if (!previewState.start) return;
+        const p = point(event), bbox = [Math.min(previewState.start[0], p[0]), Math.min(previewState.start[1], p[1]), Math.max(previewState.start[0], p[0]), Math.max(previewState.start[1], p[1])];
+        previewState.start = null;
+        if ((bbox[2] - bbox[0]) > view[2] * 0.002 && (bbox[3] - bbox[1]) > view[3] * 0.002) setSelection(bbox);
+      });
+    }
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
       document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "总面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
       const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = reviewText(data);
+      drawPreview(data.geometry_rows || []);
       table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
       table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(4)], ["金额", r => Number(r.amount || 0).toFixed(4)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
     }
+    document.getElementById("clearSelection").addEventListener("click", () => { setSelection(null); drawPreview(previewRows); });
     analyzeButton.addEventListener("click", async () => { analyzeButton.disabled = true; message.textContent = "正在提取 DXF 信息..."; downloads.innerHTML = ""; try { const res = await fetch("/api/analyze", { method: "POST", body: new FormData(form) }); const data = await readResponse(res, "提取失败"); renderData(data, "analyze"); pricingFields.style.display = "block"; message.textContent = "DXF 信息提取完成，请确认后计算报价"; } catch (err) { message.textContent = err.message; } finally { analyzeButton.disabled = false; } });
     form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; message.textContent = "正在上传并核算..."; downloads.innerHTML = ""; try { const res = await fetch("/api/quote", { method: "POST", body: new FormData(form) }); const data = await readResponse(res, "核算失败"); renderData(data, "quote"); message.textContent = "核算完成"; } catch (err) { message.textContent = err.message; } finally { button.disabled = false; } });
+    setSelection(null);
   </script>
 </body>
 </html>"""
@@ -260,6 +319,16 @@ async def _save_uploads(files: List[UploadFile], job_dir: Path) -> List[Path]:
     return saved_paths
 
 
+def _selection_bbox(min_x: Optional[float], min_y: Optional[float], max_x: Optional[float], max_y: Optional[float]) -> Optional[Tuple[float, float, float, float]]:
+    values = (min_x, min_y, max_x, max_y)
+    if any(value is None for value in values):
+        return None
+    x1, y1, x2, y2 = (float(value) for value in values if value is not None)
+    if abs(x2 - x1) < 1e-9 or abs(y2 - y1) < 1e-9:
+        return None
+    return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+
+
 def _base_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
     geometries = [g for item in batch.items if item.result for g in item.result.basic_geometries]
     return {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": 0, "total_cut_length_m": 0, "total_pierce_count": 0, "total_amount": 0, "total_profiles": sum(item.result.profiles_all_count for item in batch.items if item.result), "total_open_path_count": sum(item.result.open_path_count for item in batch.items if item.result), "total_open_path_length_m": round(sum(item.result.open_path_length_m for item in batch.items if item.result), 4), "total_area_mm2": round(sum(g.area_mm2 for g in geometries), 4), "total_perimeter_mm": round(sum(g.perimeter_mm for g in geometries), 4)}
@@ -276,24 +345,24 @@ def index() -> str:
 
 
 @app.post("/api/analyze")
-async def analyze(files: List[UploadFile] = File(...)) -> Dict[str, Any]:
+async def analyze(files: List[UploadFile] = File(...), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
-    batch = analyze_dxf_batch(await _save_uploads(files, job_dir), rates=QuoteRates(), dedupe_identical=True)
-    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": [], "raw": asdict(batch)}
+    batch = analyze_dxf_batch(await _save_uploads(files, job_dir), rates=QuoteRates(), dedupe_identical=True, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
+    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": []}
 
 
 @app.post("/api/quote")
-async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False)) -> Dict[str, Any]:
+async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     saved_paths = await _save_uploads(files, job_dir)
     rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
-    batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical)
+    batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
     if quote_open_paths:
         _add_open_path_review_rows(batch, rates)
     csv_path = job_dir / "batch_quote.csv"
@@ -304,7 +373,7 @@ async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"
     cut_m = sum(row.cut_length_m * row.quantity for row in batch.quote_rows)
     pierces = sum(row.pierce_count * row.quantity for row in batch.quote_rows)
     job_id = job_dir.name
-    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4)}, "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "raw": asdict(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
+    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4)}, "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
 
 
 @app.get("/api/jobs/{job_id}/{filename}")

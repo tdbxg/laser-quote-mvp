@@ -951,6 +951,10 @@ def _bbox_contains_bbox(outer: Tuple[float, float, float, float], inner: Tuple[f
     return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
 
 
+def _bbox_center(bbox: Tuple[float, float, float, float]) -> Tuple[float, float]:
+    return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+
+
 def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer_area_mm2: float = 1000.0, components: Optional[Sequence[PathComponent]] = None) -> List[PartProfile]:
     closed = [c for c in (components if components is not None else build_closed_components(segments)) if c.closed and c.area_mm2 > 1]
     outers = sorted([c for c in closed if c.area_mm2 >= min_outer_area_mm2], key=lambda c: c.area_mm2, reverse=True)
@@ -968,6 +972,20 @@ def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).inner_paths.append(comp)
     return profiles
+
+
+def filter_components_by_bbox(components: Sequence[PathComponent], selection_bbox: Optional[Tuple[float, float, float, float]]) -> List[PathComponent]:
+    if selection_bbox is None:
+        return list(components)
+    minx, miny, maxx, maxy = selection_bbox
+    return [component for component in components if minx <= _bbox_center(component.bbox)[0] <= maxx and miny <= _bbox_center(component.bbox)[1] <= maxy]
+
+
+def filter_profiles_by_bbox(profiles: Sequence[PartProfile], selection_bbox: Optional[Tuple[float, float, float, float]]) -> List[PartProfile]:
+    if selection_bbox is None:
+        return list(profiles)
+    minx, miny, maxx, maxy = selection_bbox
+    return [profile for profile in profiles if minx <= _bbox_center(profile.outer.bbox)[0] <= maxx and miny <= _bbox_center(profile.outer.bbox)[1] <= maxy]
 
 
 def deduplicate_profiles(profiles: List[PartProfile]) -> Tuple[List[PartProfile], List[int]]:
@@ -1020,7 +1038,7 @@ def calc_quote_row(profile: PartProfile, rates: QuoteRates, drawing_no: str = ""
     return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, profile.net_area_mm2, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, price * rates.quantity, "检测到重复视图，已按单件去重" if profile.duplicate_count > 1 else "")
 
 
-def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None) -> AnalysisResult:
+def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None, selection_bbox: Optional[Tuple[float, float, float, float]] = None) -> AnalysisResult:
     rates = rates or QuoteRates()
     path = Path(path)
     pairs = read_dxf_pairs(path)
@@ -1048,6 +1066,9 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     all_points = [pt for segment in segments for pt in segment.points()]
     geometry_bbox = bbox_of_points(all_points) if all_points else None
     profiles = assign_profiles(segments, circles, components=components)
+    if selection_bbox is not None:
+        profiles = filter_profiles_by_bbox(profiles, selection_bbox)
+        open_components = filter_components_by_bbox(open_components, selection_bbox)
     warnings: List[str] = []
     if skipped_counts.get("approx_type:SPLINE"):
         warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
@@ -1068,6 +1089,8 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     profiles_used, duplicate_groups = deduplicate_profiles(profiles) if dedupe_identical else (profiles, [1 for _ in profiles])
     if any(n > 1 for n in duplicate_groups):
         warnings.append("检测到疑似重复视图，系统默认按几何相同零件去重；报价前请人工确认数量。")
+    if selection_bbox is not None:
+        warnings.append("已按框选区域过滤轮廓；请确认选区覆盖全部有效切割图形。")
     used = {p.index for p in profiles_used}
     previews = [make_profile_preview(p, p.index in used) for p in profiles]
     basics = make_basic_geometries(profiles, open_components)
@@ -1083,11 +1106,11 @@ def collect_dxf_paths(paths: Sequence[str | Path]) -> List[Path]:
     return out
 
 
-def analyze_dxf_batch(paths: Sequence[str | Path], rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None) -> BatchAnalysisResult:
+def analyze_dxf_batch(paths: Sequence[str | Path], rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None, selection_bbox: Optional[Tuple[float, float, float, float]] = None) -> BatchAnalysisResult:
     batch = BatchAnalysisResult()
     for path in collect_dxf_paths(paths):
         try:
-            batch.items.append(BatchItemResult(str(path), True, analyze_dxf(path, rates, dedupe_identical, include_layers)))
+            batch.items.append(BatchItemResult(str(path), True, analyze_dxf(path, rates, dedupe_identical, include_layers, selection_bbox)))
         except Exception as exc:
             batch.items.append(BatchItemResult(str(path), False, error=str(exc)))
     return batch
