@@ -432,14 +432,19 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
 
-    for ent_type, data in iter_dxf_entities(pairs, "ENTITIES"):
+    entities = list(iter_dxf_entities(pairs, "ENTITIES"))
+    i = 0
+    while i < len(entities):
+        ent_type, data = entities[i]
         layer = _last(data, "8", "")
         layer_counts[layer] = layer_counts.get(layer, 0) + 1
         if include_set and layer not in include_set:
             skip(f"skip_layer:{layer}")
+            i += 1
             continue
         if layer_excluded(layer, exclude_layer_keywords):
             skip(f"skip_layer:{layer}")
+            i += 1
             continue
         if ent_type == "LINE":
             segments.append(Line(layer, _float(data, "10"), _float(data, "20"), _float(data, "11"), _float(data, "21")))
@@ -455,6 +460,26 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
                 if _int(data, "70") & 1:
                     pts.append(pts[0])
                 segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+        elif ent_type == "POLYLINE":
+            pts: List[Tuple[float, float]] = []
+            closed = (_int(data, "70") & 1) == 1
+            j = i + 1
+            while j < len(entities):
+                child_type, child_data = entities[j]
+                if child_type == "SEQEND":
+                    break
+                if child_type == "VERTEX":
+                    pts.append((_float(child_data, "10"), _float(child_data, "20")))
+                j += 1
+            if len(pts) >= 2:
+                if closed:
+                    pts.append(pts[0])
+                segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+            else:
+                skip("unsupported_type:POLYLINE")
+            i = j
+        elif ent_type in {"VERTEX", "SEQEND"}:
+            pass
         elif ent_type == "SPLINE":
             lines = spline_to_lines(layer, _int(data, "71", 3), _floats(data, "40"), list(zip(_floats(data, "10"), _floats(data, "20"))), _int(data, "70", 0))
             if lines:
@@ -464,6 +489,7 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
                 skip("unsupported_type:SPLINE")
         else:
             skip(f"skip_type:{ent_type}" if ent_type in {"TEXT", "MTEXT", "DIMENSION", "INSERT", "HATCH"} else f"unsupported_type:{ent_type}")
+        i += 1
     return segments, circles, layer_counts, skipped
 
 

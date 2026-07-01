@@ -66,3 +66,29 @@ def test_can_disable_dedupe() -> None:
     assert result.profiles_all_count == 2
     assert result.profiles_used_count == 2
     assert len(result.quote_rows) == 2
+
+
+def test_classic_polyline_vertex_dxf_is_supported(tmp_path: Path) -> None:
+    dxf = tmp_path / "classic_polyline.dxf"
+    dxf.write_text(
+        "\n".join([
+            "0", "SECTION", "2", "ENTITIES",
+            "0", "POLYLINE", "8", "CUT", "66", "1", "70", "1",
+            "0", "VERTEX", "8", "CUT", "10", "0", "20", "0",
+            "0", "VERTEX", "8", "CUT", "10", "100", "20", "0",
+            "0", "VERTEX", "8", "CUT", "10", "100", "20", "50",
+            "0", "VERTEX", "8", "CUT", "10", "0", "20", "50",
+            "0", "SEQEND", "0", "ENDSEC", "0", "EOF",
+        ]),
+        encoding="utf-8",
+    )
+
+    result = analyze_dxf(dxf, rates=QuoteRates(), dedupe_identical=True)
+
+    assert result.profiles_all_count == 1
+    assert result.open_path_count == 0
+    assert len(result.basic_geometries) == 1
+    assert result.basic_geometries[0].kind == "外轮廓"
+    assert math.isclose(result.basic_geometries[0].area_mm2, 5000.0, rel_tol=1e-9)
+    assert math.isclose(result.basic_geometries[0].perimeter_mm, 300.0, rel_tol=1e-9)
+    assert len(result.quote_rows) == 1

@@ -106,7 +106,7 @@ INDEX_HTML = """<!doctype html>
     const downloads = document.getElementById("downloadLinks");
     const pricingFields = document.getElementById("pricingFields");
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-    function table(el, headers, rows) { el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" + rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") + "</tbody>"; }
+    function table(el, headers, rows) { const body = rows.length ? rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") : `<tr><td colspan="${headers.length}">没有识别到可显示数据，请查看“文件状态”的跳过实体、图层和错误原因。</td></tr>`; el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" + body + "</tbody>"; }
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
