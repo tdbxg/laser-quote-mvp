@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from excel_export import write_quote_xlsx
-from quote_core import AnalysisResult, BatchAnalysisResult, QuoteRates, QuoteRow, analyze_dxf_batch, write_batch_csv
+from quote_core import AUTO_QUOTE_PROFILE_LIMIT, AnalysisResult, BatchAnalysisResult, ProfilePreview, QuoteRates, QuoteRow, analyze_dxf_batch, write_batch_csv
 
 
 app = FastAPI(title="Laser Quote API", version="0.1.0")
@@ -31,6 +31,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 JOB_ROOT = Path(tempfile.gettempdir()) / "laser_quote_api_jobs"
 DOWNLOAD_NAMES = {"batch_quote.csv", "laser_quote.xlsx"}
 APP_VERSION = os.getenv("RENDER_GIT_COMMIT", "local-dev")[:7]
+MAX_COMPLEX_PREVIEW_ROWS = 240
 
 INDEX_HTML = """<!doctype html>
 <html lang="zh-CN">
@@ -64,6 +65,8 @@ INDEX_HTML = """<!doctype html>
     .preview-box svg { display: block; height: 100%; width: 100%; }
     .preview-box path, .preview-box circle { fill: none !important; }
     .preview-actions { align-items: center; display: flex; gap: 12px; margin-top: 10px; }
+    .preview-tools { display: flex; gap: 8px; }
+    .icon-btn { align-items: center; display: inline-flex; height: 38px; justify-content: center; min-width: 38px; padding: 0 12px; }
     .secondary { background: #4b5563; }
     .table-wrap { overflow-x: auto; }
     table { border-collapse: collapse; min-width: 980px; width: 100%; }
@@ -108,7 +111,7 @@ INDEX_HTML = """<!doctype html>
     </section>
     <section id="result" style="display:none">
       <section class="panel"><h2>汇总</h2><div id="summary" class="summary"></div></section>
-      <section class="panel"><h2>图纸预览</h2><p class="hint">拖拽框选有效切割区域后，再次点击“提取 DXF 信息”或“计算待确认报价”。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
+      <section class="panel"><h2>图纸预览</h2><p class="hint">拖拽框选有效切割区域后，再次点击“提取 DXF 信息”或“计算待确认报价”。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><div class="preview-tools"><button id="zoomIn" class="secondary icon-btn" type="button" title="放大">+</button><button id="zoomOut" class="secondary icon-btn" type="button" title="缩小">-</button><button id="resetView" class="secondary icon-btn" type="button" title="重置视图">重置</button></div><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
       <section id="accuracyPanel" class="panel"><h2>复核提示</h2><p id="accuracyText"></p></section>
       <section class="panel"><h2>基础几何信息</h2><div class="table-wrap"><table id="geometryTable"></table></div></section>
       <section class="panel"><h2>报价明细</h2><div class="table-wrap"><table id="quoteTable"></table></div></section>
@@ -186,12 +189,26 @@ INDEX_HTML = """<!doctype html>
       previewBox.innerHTML = `<svg id="previewSvg" viewBox="${view.join(" ")}" preserveAspectRatio="xMidYMid meet">${shapes}${selected}</svg>`;
       const svg = document.getElementById("previewSvg");
       const selectionRect = document.getElementById("selectionRect");
-      previewState = { svg, view, selectionRect, start: null };
+      previewState = { svg, baseView: view.slice(), view: view.slice(), selectionRect, start: null };
+      const setView = (nextView) => {
+        previewState.view = nextView;
+        svg.setAttribute("viewBox", nextView.join(" "));
+      };
       const point = (event) => {
         const pt = svg.createSVGPoint(); pt.x = event.clientX; pt.y = event.clientY;
         const p = pt.matrixTransform(svg.getScreenCTM().inverse());
         return [p.x, p.y];
       };
+      const zoomAt = (anchor, factor) => {
+        const [x, y, w, h] = previewState.view;
+        const nextW = Math.max(previewState.baseView[2] / 200, Math.min(previewState.baseView[2] * 8, w * factor));
+        const nextH = Math.max(previewState.baseView[3] / 200, Math.min(previewState.baseView[3] * 8, h * factor));
+        const rx = (anchor[0] - x) / w, ry = (anchor[1] - y) / h;
+        setView([anchor[0] - nextW * rx, anchor[1] - nextH * ry, nextW, nextH]);
+      };
+      previewState.zoomCenter = (factor) => zoomAt([previewState.view[0] + previewState.view[2] / 2, previewState.view[1] + previewState.view[3] / 2], factor);
+      previewState.reset = () => setView(previewState.baseView.slice());
+      svg.addEventListener("wheel", event => { event.preventDefault(); zoomAt(point(event), event.deltaY < 0 ? 0.8 : 1.25); }, { passive: false });
       svg.addEventListener("pointerdown", event => { previewState.start = point(event); svg.setPointerCapture(event.pointerId); });
       svg.addEventListener("pointermove", event => {
         if (!previewState.start) return;
@@ -205,6 +222,9 @@ INDEX_HTML = """<!doctype html>
         if ((bbox[2] - bbox[0]) > view[2] * 0.002 && (bbox[3] - bbox[1]) > view[3] * 0.002) setSelection(bbox);
       });
     }
+    document.getElementById("zoomIn").addEventListener("click", () => previewState && previewState.zoomCenter(0.8));
+    document.getElementById("zoomOut").addEventListener("click", () => previewState && previewState.zoomCenter(1.25));
+    document.getElementById("resetView").addEventListener("click", () => previewState && previewState.reset());
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
@@ -232,8 +252,11 @@ def _safe_name(name: str) -> str:
 def _review_notes(result: AnalysisResult) -> List[str]:
     notes: List[str] = []
     exact_region = bool(result.skipped_counts.get("exact_type:REGION"))
+    complex_unselected = result.profiles_all_count > AUTO_QUOTE_PROFILE_LIMIT and not result.basic_geometries and not result.quote_rows
     if result.profiles_all_count != result.profiles_used_count:
         notes.append("检测到疑似重复轮廓，已按默认去重处理，请确认数量。")
+    if complex_unselected:
+        notes.append("复杂图预览已隐藏超大外框候选；请框选真实切割区域后重新提取。")
     if result.open_path_count:
         notes.append("存在开放路径，请确认是否需要按切割路径报价。")
     for warning in result.warnings:
@@ -305,13 +328,28 @@ def _sample_points(points: List[Tuple[float, float]], max_points: int = 80) -> L
     return [_rounded_point(point) for point in sampled]
 
 
+def _visible_previews(result: AnalysisResult) -> List[ProfilePreview]:
+    previews = list(result.profile_previews)
+    complex_unselected = result.profiles_all_count > AUTO_QUOTE_PROFILE_LIMIT and not result.basic_geometries and not result.quote_rows
+    if not complex_unselected:
+        return previews
+    areas = sorted(preview.gross_area_mm2 for preview in previews)
+    if not areas:
+        return previews
+    large_threshold = areas[max(0, int(len(areas) * 0.95) - 1)]
+    visible = [preview for preview in previews if preview.gross_area_mm2 <= large_threshold]
+    if not visible:
+        visible = previews
+    return sorted(visible, key=lambda preview: preview.gross_area_mm2)[:MAX_COMPLEX_PREVIEW_ROWS]
+
+
 def _preview_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for item in batch.items:
         if not item.result:
             continue
         source_file = Path(item.source_file).name
-        for preview in item.result.profile_previews:
+        for preview in _visible_previews(item.result):
             rows.append({
                 "source_file": source_file,
                 "part_index": preview.part_index,
