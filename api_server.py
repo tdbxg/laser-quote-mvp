@@ -5,9 +5,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from excel_export import write_quote_xlsx
 from quote_core import AnalysisResult, BatchAnalysisResult, QuoteRates, QuoteRow, analyze_dxf_batch, write_batch_csv
@@ -21,6 +21,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"detail": f"服务器解析失败：{type(exc).__name__}: {exc}"})
 
 JOB_ROOT = Path(tempfile.gettempdir()) / "laser_quote_api_jobs"
 DOWNLOAD_NAMES = {"batch_quote.csv", "laser_quote.xlsx"}
@@ -116,6 +121,16 @@ INDEX_HTML = """<!doctype html>
       if (messages.length) return messages.join("；");
       return "已识别有效轮廓。自动结果仍建议与原图人工核对后再作为正式报价。";
     }
+    async function readResponse(res, fallback) {
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : {}; } catch (err) {
+        const plain = text.replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim();
+        throw new Error(plain ? `服务器返回错误页：${plain.slice(0, 120)}` : fallback);
+      }
+      if (!res.ok) throw new Error(data.detail || fallback);
+      return data;
+    }
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
@@ -125,8 +140,8 @@ INDEX_HTML = """<!doctype html>
       table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(4)], ["金额", r => Number(r.amount || 0).toFixed(4)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
     }
-    analyzeButton.addEventListener("click", async () => { analyzeButton.disabled = true; message.textContent = "正在提取 DXF 信息..."; downloads.innerHTML = ""; try { const res = await fetch("/api/analyze", { method: "POST", body: new FormData(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.detail || "提取失败"); renderData(data, "analyze"); pricingFields.style.display = "block"; message.textContent = "DXF 信息提取完成，请确认后计算报价"; } catch (err) { message.textContent = err.message; } finally { analyzeButton.disabled = false; } });
-    form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; message.textContent = "正在上传并核算..."; downloads.innerHTML = ""; try { const res = await fetch("/api/quote", { method: "POST", body: new FormData(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.detail || "核算失败"); renderData(data, "quote"); message.textContent = "核算完成"; } catch (err) { message.textContent = err.message; } finally { button.disabled = false; } });
+    analyzeButton.addEventListener("click", async () => { analyzeButton.disabled = true; message.textContent = "正在提取 DXF 信息..."; downloads.innerHTML = ""; try { const res = await fetch("/api/analyze", { method: "POST", body: new FormData(form) }); const data = await readResponse(res, "提取失败"); renderData(data, "analyze"); pricingFields.style.display = "block"; message.textContent = "DXF 信息提取完成，请确认后计算报价"; } catch (err) { message.textContent = err.message; } finally { analyzeButton.disabled = false; } });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; message.textContent = "正在上传并核算..."; downloads.innerHTML = ""; try { const res = await fetch("/api/quote", { method: "POST", body: new FormData(form) }); const data = await readResponse(res, "核算失败"); renderData(data, "quote"); message.textContent = "核算完成"; } catch (err) { message.textContent = err.message; } finally { button.disabled = false; } });
   </script>
 </body>
 </html>"""

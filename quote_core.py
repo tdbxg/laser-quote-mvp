@@ -943,19 +943,28 @@ def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> Li
     return result
 
 
-def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer_area_mm2: float = 1000.0) -> List[PartProfile]:
-    closed = [c for c in build_closed_components(segments) if c.closed and c.area_mm2 > 1]
+def _bbox_contains_point(bbox: Tuple[float, float, float, float], pt: Tuple[float, float]) -> bool:
+    return bbox[0] <= pt[0] <= bbox[2] and bbox[1] <= pt[1] <= bbox[3]
+
+
+def _bbox_contains_bbox(outer: Tuple[float, float, float, float], inner: Tuple[float, float, float, float]) -> bool:
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
+def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer_area_mm2: float = 1000.0, components: Optional[Sequence[PathComponent]] = None) -> List[PartProfile]:
+    closed = [c for c in (components if components is not None else build_closed_components(segments)) if c.closed and c.area_mm2 > 1]
     outers = sorted([c for c in closed if c.area_mm2 >= min_outer_area_mm2], key=lambda c: c.area_mm2, reverse=True)
     profiles = [PartProfile(i + 1, outer=o) for i, o in enumerate(outers)]
     for circle in circles:
-        candidates = [p for p in profiles if point_in_polygon((circle.cx, circle.cy), p.outer.points)]
+        center = (circle.cx, circle.cy)
+        candidates = [p for p in profiles if _bbox_contains_point(p.outer.bbox, center) and point_in_polygon(center, p.outer.points)]
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).holes.append(circle)
     for comp in closed:
         if comp in outers:
             continue
         center = ((comp.bbox[0] + comp.bbox[2]) / 2, (comp.bbox[1] + comp.bbox[3]) / 2)
-        candidates = [p for p in profiles if point_in_polygon(center, p.outer.points)]
+        candidates = [p for p in profiles if _bbox_contains_bbox(p.outer.bbox, comp.bbox) and point_in_polygon(center, p.outer.points)]
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).inner_paths.append(comp)
     return profiles
@@ -1038,7 +1047,7 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     open_components = [c for c in components if not c.closed]
     all_points = [pt for segment in segments for pt in segment.points()]
     geometry_bbox = bbox_of_points(all_points) if all_points else None
-    profiles = assign_profiles(segments, circles)
+    profiles = assign_profiles(segments, circles, components=components)
     warnings: List[str] = []
     if skipped_counts.get("approx_type:SPLINE"):
         warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
