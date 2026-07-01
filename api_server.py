@@ -62,6 +62,7 @@ INDEX_HTML = """<!doctype html>
     .ok { background: #ecfdf5; border-color: #10b981; }
     .preview-box { background: #111827; border-radius: 8px; height: 360px; margin-top: 12px; overflow: hidden; position: relative; }
     .preview-box svg { display: block; height: 100%; width: 100%; }
+    .preview-box path, .preview-box circle { fill: none !important; }
     .preview-actions { align-items: center; display: flex; gap: 12px; margin-top: 10px; }
     .secondary { background: #4b5563; }
     .table-wrap { overflow-x: auto; }
@@ -170,12 +171,12 @@ INDEX_HTML = """<!doctype html>
       const pad = Math.max(maxX - minX, maxY - minY) * 0.03 || 1;
       const view = [minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2];
       const current = selectedBbox();
-      const strokeWidth = Math.max(view[2], view[3]) / 1200;
+      const strokeWidth = Math.max(view[2], view[3]) / 2400;
       const shapes = rows.map((r) => {
         if (r.outer_points && r.outer_points.length > 1) {
-          const outer = `<path d="${pointPath(r.outer_points)}" fill="none" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></path>`;
-          const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path)}" fill="none" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></path>`).join("");
-          const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" fill="none" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></circle>`).join("");
+          const outer = `<path d="${pointPath(r.outer_points)}" style="fill:none!important" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.78"></path>`;
+          const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path)}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></path>`).join("");
+          const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></circle>`).join("");
           return outer + inners + holes;
         }
         const b = r.bbox;
@@ -207,7 +208,7 @@ INDEX_HTML = """<!doctype html>
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
-      document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "总面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
+      document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "候选轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "已确认面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
       const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = reviewText(data);
       drawPreview(data.preview_rows || data.geometry_rows || []);
       table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);

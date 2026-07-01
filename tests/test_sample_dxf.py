@@ -179,3 +179,34 @@ def test_region_only_dxf_reports_actionable_warning(tmp_path: Path) -> None:
     assert result.skipped_counts["unsupported_type:REGION"] == 1
     assert any("文件已打开" in warning for warning in result.warnings)
     assert any("未发现可用切割曲线实体" in warning for warning in result.warnings)
+
+
+def test_complex_layout_requires_selection_before_quote(tmp_path: Path) -> None:
+    dxf = tmp_path / "complex_layout.dxf"
+    entities = ["0", "SECTION", "2", "ENTITIES"]
+    for i in range(51):
+        x = i * 60
+        entities.extend([
+            "0", "LWPOLYLINE", "8", "CUT", "70", "1",
+            "10", str(x), "20", "0",
+            "10", str(x + 40), "20", "0",
+            "10", str(x + 40), "20", "40",
+            "10", str(x), "20", "40",
+        ])
+    entities.extend(["0", "ENDSEC", "0", "EOF"])
+    dxf.write_text("\n".join(entities), encoding="utf-8")
+
+    result = analyze_dxf(dxf, rates=QuoteRates(), dedupe_identical=True)
+
+    assert result.profiles_all_count == 51
+    assert result.profiles_used_count == 0
+    assert result.basic_geometries == []
+    assert result.quote_rows == []
+    assert len(result.profile_previews) == 51
+    assert any("未框选前不自动汇总面积" in warning for warning in result.warnings)
+
+    selected = analyze_dxf(dxf, rates=QuoteRates(), dedupe_identical=True, selection_bbox=(-1, -1, 41, 41))
+
+    assert selected.profiles_all_count == 1
+    assert len(selected.basic_geometries) == 1
+    assert len(selected.quote_rows) == 1

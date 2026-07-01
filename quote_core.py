@@ -11,6 +11,7 @@ import re
 
 KG_DENSITY_FACTOR = 1_000_000.0
 EXCLUDED_LAYER_KEYWORDS = ("图框", "标题", "标注", "文字", "中心", "辅助", "虚线", "DIM", "TEXT", "FRAME", "BORDER", "CENTER")
+AUTO_QUOTE_PROFILE_LIMIT = 50
 
 
 @dataclass
@@ -1069,6 +1070,8 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     if selection_bbox is not None:
         profiles = filter_profiles_by_bbox(profiles, selection_bbox)
         open_components = filter_components_by_bbox(open_components, selection_bbox)
+    profiles_all_count = len(profiles)
+    selection_required = selection_bbox is None and profiles_all_count > AUTO_QUOTE_PROFILE_LIMIT
     warnings: List[str] = []
     if skipped_counts.get("approx_type:SPLINE"):
         warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
@@ -1085,15 +1088,17 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
             warnings.append("未识别到闭合外轮廓，请检查 DXF 是否为 1:1 展开切割图，或切割线是否在被过滤图层。")
         if open_components:
             warnings.append(f"已提取开放切割路径 {len(open_components)} 组，总长约 {sum(c.length_mm for c in open_components) / 1000.0:.4f} m；未生成正式报价行，需人工确认是否按开放路径报价。")
-    profiles_all_count = len(profiles)
-    profiles_used, duplicate_groups = deduplicate_profiles(profiles) if dedupe_identical else (profiles, [1 for _ in profiles])
-    if any(n > 1 for n in duplicate_groups):
+    if selection_required:
+        warnings.append(f"检测到 {profiles_all_count} 个闭合候选轮廓，疑似包含多视图、图框或标注的复杂排版图；未框选前不自动汇总面积、不生成报价，请在预览中框选有效切割区域后重新提取。")
+    profiles_for_quote = [] if selection_required else profiles
+    profiles_used, duplicate_groups = deduplicate_profiles(profiles_for_quote) if dedupe_identical else (profiles_for_quote, [1 for _ in profiles_for_quote])
+    if duplicate_groups and any(n > 1 for n in duplicate_groups):
         warnings.append("检测到疑似重复视图，系统默认按几何相同零件去重；报价前请人工确认数量。")
     if selection_bbox is not None:
         warnings.append("已按框选区域过滤轮廓；请确认选区覆盖全部有效切割图形。")
     used = {p.index for p in profiles_used}
     previews = [make_profile_preview(p, p.index in used) for p in profiles]
-    basics = make_basic_geometries(profiles, open_components)
+    basics = [] if selection_required else make_basic_geometries(profiles, open_components)
     rows = [calc_quote_row(p, rates, drawing_no, name) for p in profiles_used]
     return AnalysisResult(str(path), drawing_no, name, material_hint, texts, layer_counts, skipped_counts, profiles_all_count, len(profiles_used), len(open_components), sum(c.length_mm for c in open_components) / 1000.0, geometry_bbox, basics, duplicate_groups, previews, rows, warnings)
 
