@@ -20,11 +20,14 @@ class Line:
     y1: float
     x2: float
     y2: float
+    length_override: Optional[float] = None
 
     def endpoints(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         return (self.x1, self.y1), (self.x2, self.y2)
 
     def length(self) -> float:
+        if self.length_override is not None:
+            return self.length_override
         return math.hypot(self.x2 - self.x1, self.y2 - self.y1)
 
     def points(self, reverse: bool = False) -> List[Tuple[float, float]]:
@@ -416,7 +419,7 @@ def _de_boor_point(degree: int, knots: Sequence[float], controls: Sequence[Tuple
     return d[degree]
 
 
-def spline_to_lines(layer: str, degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], flags: int = 0, samples_per_span: int = 60) -> List[Line]:
+def _sample_spline_points(degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], samples_per_span: int) -> List[Tuple[float, float]]:
     if degree < 1 or len(controls) <= degree or len(knots) < len(controls) + degree + 1:
         return []
     start, end = knots[degree], knots[len(controls)]
@@ -424,10 +427,22 @@ def spline_to_lines(layer: str, degree: int, knots: Sequence[float], controls: S
         return []
     span_count = max(1, len({round(k, 9) for k in knots if start < k < end}) + 1)
     sample_count = max(16, span_count * samples_per_span)
-    pts = [_de_boor_point(degree, knots, controls, start + (end - start) * i / sample_count) for i in range(sample_count + 1)]
+    return [_de_boor_point(degree, knots, controls, start + (end - start) * i / sample_count) for i in range(sample_count + 1)]
+
+
+def spline_to_lines(layer: str, degree: int, knots: Sequence[float], controls: Sequence[Tuple[float, float]], flags: int = 0, samples_per_span: int = 64) -> List[Line]:
+    pts = _sample_spline_points(degree, knots, controls, samples_per_span)
+    if not pts:
+        return []
     if flags & 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > 0.01:
         pts.append(pts[0])
-    return [Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-9]
+    high_pts = _sample_spline_points(degree, knots, controls, 1000)
+    if flags & 1 and high_pts and math.hypot(high_pts[0][0] - high_pts[-1][0], high_pts[0][1] - high_pts[-1][1]) > 0.01:
+        high_pts.append(high_pts[0])
+    chord_length = sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(pts, pts[1:]))
+    high_length = sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(high_pts, high_pts[1:]))
+    length_scale = high_length / chord_length if chord_length > 1e-12 and high_length > 0 else 1.0
+    return [Line(layer, a[0], a[1], b[0], b[1], math.hypot(a[0] - b[0], a[1] - b[1]) * length_scale) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-9]
 
 
 Transform = Tuple[float, float, float, float, float]
@@ -606,7 +621,48 @@ def extract_region_segments(path: Path, include_layers: Optional[Sequence[str]] 
     return segments, skipped
 
 
-def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = ()) -> Tuple[List[Line | Arc], List[Circle], Dict[str, int], Dict[str, int]]:
+def extract_spline_segments(path: Path, include_layers: Optional[Sequence[str]] = None) -> Tuple[List[Line | Arc], Dict[str, int]]:
+    try:
+        os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+        import ezdxf  # type: ignore
+    except ImportError:
+        return [], {"unsupported_type:SPLINE_EZDXF_IMPORT": 1}
+    try:
+        doc = ezdxf.readfile(path)
+    except Exception:
+        return [], {"unsupported_type:SPLINE_EZDXF_READ": 1}
+    include_set = set(include_layers or [])
+    segments: List[Line | Arc] = []
+    skipped: Dict[str, int] = {}
+    for entity in doc.modelspace():
+        if entity.dxftype() != "SPLINE":
+            continue
+        layer = getattr(entity.dxf, "layer", "") or ""
+        if include_set and layer not in include_set:
+            skipped[f"skip_layer:{layer}"] = skipped.get(f"skip_layer:{layer}", 0) + 1
+            continue
+        if layer_excluded(layer):
+            skipped[f"skip_layer:{layer}"] = skipped.get(f"skip_layer:{layer}", 0) + 1
+            continue
+        pts = [(p.x, p.y) for p in entity.flattening(0.000438)]
+        if len(pts) < 2:
+            skipped["unsupported_type:SPLINE"] = skipped.get("unsupported_type:SPLINE", 0) + 1
+            continue
+        chord_length = sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(pts, pts[1:]))
+        try:
+            curve_length = entity.construction_tool().measure(segments=2000).length
+        except Exception:
+            curve_length = chord_length
+        length_scale = curve_length / chord_length if chord_length > 1e-12 and curve_length > 0 else 1.0
+        for a, b in zip(pts, pts[1:]):
+            chord = math.hypot(a[0] - b[0], a[1] - b[1])
+            if chord > 1e-9:
+                segments.append(Line(layer, a[0], a[1], b[0], b[1], chord * length_scale))
+        skipped["approx_type:SPLINE"] = skipped.get("approx_type:SPLINE", 0) + 1
+    return segments, skipped
+
+
+def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = (), include_splines: bool = True) -> Tuple[List[Line | Arc], List[Circle], Dict[str, int], Dict[str, int]]:
     include_set = set(include_layers or [])
     segments: List[Line | Arc] = []
     circles: List[Circle] = []
@@ -679,12 +735,21 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
             elif ent_type in {"VERTEX", "SEQEND"}:
                 pass
             elif ent_type == "SPLINE":
+                if not include_splines:
+                    skip("defer_type:SPLINE")
+                    i += 1
+                    continue
                 lines = spline_to_lines(layer, _int(data, "71", 3), _floats(data, "40"), list(zip(_floats(data, "10"), _floats(data, "20"))), _int(data, "70", 0))
                 if lines:
                     for line in lines:
                         p1 = _transform_point((line.x1, line.y1), transform)
                         p2 = _transform_point((line.x2, line.y2), transform)
-                        segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1]))
+                        source_length = math.hypot(line.x2 - line.x1, line.y2 - line.y1)
+                        target_length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                        length_override = None
+                        if line.length_override is not None and source_length > 1e-12:
+                            length_override = line.length_override * target_length / source_length
+                        segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1], length_override))
                     skip("approx_type:SPLINE")
                 else:
                     skip("unsupported_type:SPLINE")
@@ -954,7 +1019,17 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     pairs = read_dxf_pairs(path)
     texts = extract_all_texts(pairs)
     drawing_no, name, material_hint = infer_metadata(texts)
-    segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers)
+    has_spline = any(ent_type == "SPLINE" for ent_type, _ in iter_dxf_entities(pairs, "ENTITIES"))
+    segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers, include_splines=not has_spline)
+    if has_spline:
+        spline_segments, spline_skipped = extract_spline_segments(path, include_layers=include_layers)
+        if spline_segments:
+            segments.extend(spline_segments)
+            skipped_counts.pop("defer_type:SPLINE", None)
+            for key, value in spline_skipped.items():
+                skipped_counts[key] = skipped_counts.get(key, 0) + value
+        else:
+            segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers, include_splines=True)
     if skipped_counts.get("unsupported_type:REGION"):
         region_segments, region_skipped = extract_region_segments(path, include_layers=include_layers)
         if region_segments:
