@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import csv
 import json
 import math
+import os
 import re
 
 KG_DENSITY_FACTOR = 1_000_000.0
@@ -39,28 +40,35 @@ class Arc:
     r: float
     start_deg: float
     end_deg: float
+    sweep_deg: Optional[float] = None
 
     def _span(self) -> float:
+        if self.sweep_deg is not None:
+            return abs(self.sweep_deg)
         span = self.end_deg - self.start_deg
         while span <= 0:
             span += 360
         return span
 
+    def _signed_span(self) -> float:
+        if self.sweep_deg is not None:
+            return self.sweep_deg
+        return self._span()
+
     def endpoints(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-        a1, a2 = math.radians(self.start_deg), math.radians(self.end_deg)
+        a1 = math.radians(self.start_deg)
+        a2 = math.radians(self.start_deg + self._signed_span())
         return ((self.cx + self.r * math.cos(a1), self.cy + self.r * math.sin(a1)), (self.cx + self.r * math.cos(a2), self.cy + self.r * math.sin(a2)))
 
     def length(self) -> float:
         return 2 * math.pi * self.r * self._span() / 360.0
 
     def points(self, reverse: bool = False, max_step_deg: float = 5.0) -> List[Tuple[float, float]]:
-        end = self.end_deg
-        while end <= self.start_deg:
-            end += 360
-        steps = max(2, int(math.ceil((end - self.start_deg) / max_step_deg)) + 1)
+        span = self._signed_span()
+        steps = max(2, int(math.ceil(abs(span) / max_step_deg)) + 1)
         pts = []
         for i in range(steps):
-            a = math.radians(self.start_deg + (end - self.start_deg) * i / (steps - 1))
+            a = math.radians(self.start_deg + span * i / (steps - 1))
             pts.append((self.cx + self.r * math.cos(a), self.cy + self.r * math.sin(a)))
         return list(reversed(pts)) if reverse else pts
 
@@ -470,6 +478,134 @@ def _collect_blocks(pairs: Sequence[Tuple[str, str]]) -> Dict[str, List[Tuple[st
     return blocks
 
 
+def _ref_id(token: str) -> Optional[int]:
+    if not token.startswith("$"):
+        return None
+    try:
+        value = int(token[1:])
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _angle_deg(center: Tuple[float, float], point: Tuple[float, float]) -> float:
+    return math.degrees(math.atan2(point[1] - center[1], point[0] - center[0]))
+
+
+def _short_signed_sweep(start_deg: float, end_deg: float) -> float:
+    sweep = (end_deg - start_deg) % 360.0
+    if sweep > 180.0:
+        sweep -= 360.0
+    return sweep
+
+
+def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") -> Tuple[List[Line | Arc], Dict[str, int]]:
+    records = [line.strip() for line in acis_data if line.strip()]
+    if len(records) >= 4 and records[-1].lower().startswith("end-of-acis-data"):
+        records = records[3:-1]
+    points: Dict[int, Tuple[float, float]] = {}
+    vertices: Dict[int, int] = {}
+    curves: Dict[int, Dict[str, Any]] = {}
+    edges: List[Dict[str, Any]] = []
+    skipped: Dict[str, int] = {}
+
+    def skip(reason: str) -> None:
+        skipped[reason] = skipped.get(reason, 0) + 1
+
+    for record_id, record in enumerate(records):
+        parts = record.split()
+        if not parts:
+            continue
+        kind = parts[0]
+        if kind == "point" and len(parts) >= 7:
+            try:
+                points[record_id] = (float(parts[4]), float(parts[5]))
+            except ValueError:
+                skip("unsupported_acis:point")
+        elif kind == "vertex" and len(parts) >= 5:
+            point_id = _ref_id(parts[-2])
+            if point_id is not None:
+                vertices[record_id] = point_id
+        elif kind == "straight-curve" and len(parts) >= 10:
+            try:
+                curves[record_id] = {"kind": "line", "origin": (float(parts[4]), float(parts[5])), "direction": (float(parts[7]), float(parts[8]))}
+            except ValueError:
+                skip("unsupported_acis:straight")
+        elif kind == "ellipse-curve" and len(parts) >= 14:
+            try:
+                center = (float(parts[4]), float(parts[5]))
+                major = (float(parts[10]), float(parts[11]))
+                ratio = float(parts[13])
+                curves[record_id] = {"kind": "ellipse", "center": center, "major": major, "ratio": ratio}
+            except ValueError:
+                skip("unsupported_acis:ellipse")
+        elif kind == "edge" and len(parts) >= 10:
+            start_vertex = _ref_id(parts[4])
+            end_vertex = _ref_id(parts[6])
+            curve_id = _ref_id(parts[9])
+            if start_vertex is not None and end_vertex is not None and curve_id is not None:
+                edges.append({"start_vertex": start_vertex, "end_vertex": end_vertex, "curve": curve_id})
+
+    segments: List[Line | Arc] = []
+    for edge in edges:
+        start_point_id = vertices.get(edge["start_vertex"])
+        end_point_id = vertices.get(edge["end_vertex"])
+        p1 = points.get(start_point_id) if start_point_id is not None else None
+        p2 = points.get(end_point_id) if end_point_id is not None else None
+        curve = curves.get(edge["curve"])
+        if p1 is None or p2 is None or curve is None:
+            skip("unsupported_acis:edge")
+            continue
+        if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= 1e-9:
+            continue
+        if curve["kind"] == "line":
+            segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1]))
+        elif curve["kind"] == "ellipse":
+            major = curve["major"]
+            radius = math.hypot(major[0], major[1])
+            if radius <= 1e-9 or abs(curve["ratio"] - 1.0) > 1e-7:
+                skip("unsupported_acis:non_circular_ellipse")
+                continue
+            center = curve["center"]
+            start_deg = _angle_deg(center, p1)
+            end_deg = _angle_deg(center, p2)
+            sweep = _short_signed_sweep(start_deg, end_deg)
+            segments.append(Arc(layer, center[0], center[1], radius, start_deg, end_deg, sweep))
+    if segments:
+        skipped["exact_type:REGION"] = skipped.get("exact_type:REGION", 0) + len(segments)
+    return segments, skipped
+
+
+def extract_region_segments(path: Path, include_layers: Optional[Sequence[str]] = None) -> Tuple[List[Line | Arc], Dict[str, int]]:
+    try:
+        os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+        import ezdxf  # type: ignore
+    except ImportError:
+        return [], {"unsupported_type:REGION_ACIS_IMPORT": 1}
+    try:
+        doc = ezdxf.readfile(path)
+    except Exception:
+        return [], {"unsupported_type:REGION_ACIS_READ": 1}
+    include_set = set(include_layers or [])
+    segments: List[Line | Arc] = []
+    skipped: Dict[str, int] = {}
+    for entity in doc.modelspace():
+        if entity.dxftype() != "REGION":
+            continue
+        layer = getattr(entity.dxf, "layer", "REGION") or "REGION"
+        if include_set and layer not in include_set:
+            skipped[f"skip_layer:{layer}"] = skipped.get(f"skip_layer:{layer}", 0) + 1
+            continue
+        if layer_excluded(layer):
+            skipped[f"skip_layer:{layer}"] = skipped.get(f"skip_layer:{layer}", 0) + 1
+            continue
+        region_segments, region_skipped = _segments_from_acis_data(getattr(entity, "acis_data", []), layer)
+        segments.extend(region_segments)
+        for key, value in region_skipped.items():
+            skipped[key] = skipped.get(key, 0) + value
+    return segments, skipped
+
+
 def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = ()) -> Tuple[List[Line | Arc], List[Circle], Dict[str, int], Dict[str, int]]:
     include_set = set(include_layers or [])
     segments: List[Line | Arc] = []
@@ -629,7 +765,7 @@ def point_in_polygon(pt: Tuple[float, float], polygon: Sequence[Tuple[float, flo
     return inside
 
 
-def order_component_points(segments: List[Line | Arc], tol: float = 0.05) -> List[Tuple[float, float]]:
+def order_component_segments(segments: List[Line | Arc], tol: float = 0.05) -> List[Tuple[int, bool]]:
     endpoints = [seg.endpoints() for seg in segments]
     keys = [(point_key(a, tol), point_key(b, tol)) for a, b in endpoints]
     adjacency: Dict[Tuple[int, int], List[int]] = {}
@@ -638,7 +774,7 @@ def order_component_points(segments: List[Line | Arc], tol: float = 0.05) -> Lis
         adjacency.setdefault(kb, []).append(i)
     current = keys[0][0]
     used = set()
-    pts: List[Tuple[float, float]] = []
+    ordered: List[Tuple[int, bool]] = []
     for _ in range(len(segments)):
         candidates = [idx for idx in adjacency.get(current, []) if idx not in used]
         if not candidates:
@@ -647,14 +783,46 @@ def order_component_points(segments: List[Line | Arc], tol: float = 0.05) -> Lis
         used.add(idx)
         ka, kb = keys[idx]
         reverse = current != ka
-        seg_pts = segments[idx].points(reverse=reverse)
-        pts.extend(seg_pts[1:] if pts else seg_pts)
+        ordered.append((idx, reverse))
         current = ka if reverse else kb
     if len(used) != len(segments):
         return []
+    return ordered
+
+
+def order_component_points(segments: List[Line | Arc], tol: float = 0.05) -> List[Tuple[float, float]]:
+    ordered_segments = order_component_segments(segments, tol)
+    pts: List[Tuple[float, float]] = []
+    for idx, reverse in ordered_segments:
+        seg_pts = segments[idx].points(reverse=reverse)
+        pts.extend(seg_pts[1:] if pts else seg_pts)
     if pts and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > tol:
         pts.append(pts[0])
     return pts
+
+
+def segment_area_integral(segment: Line | Arc, reverse: bool = False) -> float:
+    if isinstance(segment, Line):
+        pts = segment.points(reverse=reverse)
+        (x1, y1), (x2, y2) = pts[0], pts[-1]
+        return x1 * y2 - y1 * x2
+    span = math.radians(segment._signed_span())
+    if reverse:
+        span = -span
+        start_deg = segment.start_deg + segment._signed_span()
+    else:
+        start_deg = segment.start_deg
+    a1 = math.radians(start_deg)
+    a2 = a1 + span
+    x1 = segment.cx + segment.r * math.cos(a1)
+    y1 = segment.cy + segment.r * math.sin(a1)
+    x2 = segment.cx + segment.r * math.cos(a2)
+    y2 = segment.cy + segment.r * math.sin(a2)
+    return segment.cx * (y2 - y1) - segment.cy * (x2 - x1) + segment.r * segment.r * span
+
+
+def exact_path_area(segments: List[Line | Arc], ordered: List[Tuple[int, bool]]) -> float:
+    return abs(sum(segment_area_integral(segments[idx], reverse) for idx, reverse in ordered)) / 2.0
 
 
 def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> List[PathComponent]:
@@ -691,7 +859,15 @@ def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> Li
             degree[k1] = degree.get(k1, 0) + 1
             degree[k2] = degree.get(k2, 0) + 1
         closed = bool(degree) and all(v == 2 for v in degree.values())
-        ordered = order_component_points([segments[i] for i in seg_indices], tol) if closed else []
+        component_segments = [segments[i] for i in seg_indices]
+        ordered_segment_refs = order_component_segments(component_segments, tol) if closed else []
+        ordered = []
+        if ordered_segment_refs:
+            for local_idx, reverse in ordered_segment_refs:
+                seg_pts = component_segments[local_idx].points(reverse=reverse)
+                ordered.extend(seg_pts[1:] if ordered else seg_pts)
+            if ordered and math.hypot(ordered[0][0] - ordered[-1][0], ordered[0][1] - ordered[-1][1]) > tol:
+                ordered.append(ordered[0])
         if not ordered:
             ordered = [pt for i in seg_indices for pt in segments[i].points()]
         if not closed and len(ordered) >= 3:
@@ -699,7 +875,8 @@ def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> Li
             if endpoint_gap <= max(tol, 0.5) and shoelace_area(ordered) > 1:
                 closed = True
         length = sum(segments[i].length() for i in seg_indices)
-        result.append(PathComponent([segments[i] for i in seg_indices], ordered, length, shoelace_area(ordered) if closed else 0.0, bbox_of_points(ordered), closed))
+        area = exact_path_area(component_segments, ordered_segment_refs) if closed and ordered_segment_refs else shoelace_area(ordered) if closed else 0.0
+        result.append(PathComponent(component_segments, ordered, length, area, bbox_of_points(ordered), closed))
     return result
 
 
@@ -740,16 +917,17 @@ def make_profile_preview(profile: PartProfile, selected_by_default: bool) -> Pro
     return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_mm / 1000.0, profile.gross_area_mm2, profile.net_area_mm2)
 
 
-def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, float]], perimeter_mm: float, bbox: Tuple[float, float, float, float], closed: bool, approximate: bool, note: str) -> BasicGeometry:
+def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, float]], perimeter_mm: float, bbox: Tuple[float, float, float, float], closed: bool, approximate: bool, note: str, area_override: Optional[float] = None) -> BasicGeometry:
     props = polygon_mass_properties(points) if closed else {"area": 0.0, "cx": None, "cy": None, "ix_c": None, "iy_c": None, "ixy_c": None, "rx": None, "ry": None}
     centroid = None if props["cx"] is None or props["cy"] is None else (float(props["cx"]), float(props["cy"]))
-    return BasicGeometry(index, kind, closed, approximate, float(props["area"] or 0.0), perimeter_mm, bbox, bbox[2] - bbox[0], bbox[3] - bbox[1], centroid, None if props["ix_c"] is None else float(props["ix_c"]), None if props["iy_c"] is None else float(props["iy_c"]), None if props["ixy_c"] is None else float(props["ixy_c"]), None if props["rx"] is None else float(props["rx"]), None if props["ry"] is None else float(props["ry"]), note)
+    area = float(area_override if area_override is not None else props["area"] or 0.0)
+    return BasicGeometry(index, kind, closed, approximate, area, perimeter_mm, bbox, bbox[2] - bbox[0], bbox[3] - bbox[1], centroid, None if props["ix_c"] is None else float(props["ix_c"]), None if props["iy_c"] is None else float(props["iy_c"]), None if props["ixy_c"] is None else float(props["ixy_c"]), None if props["rx"] is None else float(props["rx"]), None if props["ry"] is None else float(props["ry"]), note)
 
 
 def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequence[PathComponent]) -> List[BasicGeometry]:
     out: List[BasicGeometry] = []
     for profile in profiles:
-        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.outer.length_mm, profile.outer.bbox, True, False, "已识别为闭合外轮廓"))
+        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.outer.length_mm, profile.outer.bbox, True, False, "已识别为闭合外轮廓", profile.outer.area_mm2))
     for component in open_components:
         gap = math.hypot(component.points[0][0] - component.points[-1][0], component.points[0][1] - component.points[-1][1]) if len(component.points) >= 2 else 999
         near_closed = len(component.points) >= 3 and gap <= 0.5 and shoelace_area(component.points) > 1
@@ -777,6 +955,12 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     texts = extract_all_texts(pairs)
     drawing_no, name, material_hint = infer_metadata(texts)
     segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers)
+    if skipped_counts.get("unsupported_type:REGION"):
+        region_segments, region_skipped = extract_region_segments(path, include_layers=include_layers)
+        if region_segments:
+            segments.extend(region_segments)
+        for key, value in region_skipped.items():
+            skipped_counts[key] = skipped_counts.get(key, 0) + value
     components = build_closed_components(segments)
     open_components = [c for c in components if not c.closed]
     all_points = [pt for segment in segments for pt in segment.points()]
@@ -785,7 +969,9 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     warnings: List[str] = []
     if skipped_counts.get("approx_type:SPLINE"):
         warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
-    if skipped_counts.get("unsupported_type:REGION"):
+    if skipped_counts.get("exact_type:REGION"):
+        warnings.append("检测到 REGION 面域实体，已从 ACIS 边界精确还原直线/圆弧；正式报价前请人工核对外轮廓和内孔是否与图纸一致。")
+    if skipped_counts.get("unsupported_type:REGION") and not skipped_counts.get("exact_type:REGION"):
         warnings.append("文件已打开，但检测到 REGION 面域实体；当前文件没有可直接报价的边界曲线。请在 CAD 中将面域分解/炸开为 LINE、ARC、LWPOLYLINE、SPLINE 等 1:1 切割轮廓后再上传。")
     if skipped_counts.get("unsupported_type:POINT") and not segments and not circles:
         warnings.append("文件只包含点、视口或面域等非切割曲线实体，无法计算切割长度、面积和重量。")

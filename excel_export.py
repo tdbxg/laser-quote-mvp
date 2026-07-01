@@ -78,13 +78,13 @@ def write_quote_xlsx(source: QuoteSource, out_path: str | Path) -> None:
             row.thickness_mm,
             row.size_mm,
             row.quantity,
-            round(row.unit_price, 2),
-            round(row.amount, 2),
+            round(row.unit_price, 4),
+            round(row.amount, 4),
             "；".join(note_parts),
         ])
     total_row = quote_ws.max_row + 1
     quote_ws.cell(total_row, 8, "合计")
-    quote_ws.cell(total_row, 9, round(total, 2))
+    quote_ws.cell(total_row, 9, round(total, 4))
     quote_ws.cell(total_row, 8).font = Font(bold=True)
     quote_ws.cell(total_row, 9).font = Font(bold=True)
 
@@ -113,8 +113,8 @@ def write_quote_xlsx(source: QuoteSource, out_path: str | Path) -> None:
             row.hole_count,
             row.pierce_count,
             round(row.cut_length_m, 4),
-            round(row.gross_area_mm2, 2),
-            round(row.net_area_mm2, 2),
+            round(row.gross_area_mm2, 4),
+            round(row.net_area_mm2, 4),
             round(row.gross_weight_kg, 4),
             round(row.net_weight_kg, 4),
             round(row.material_fee_each, 2),
@@ -122,9 +122,9 @@ def write_quote_xlsx(source: QuoteSource, out_path: str | Path) -> None:
             round(row.pierce_fee_each, 2),
             round(row.scrap_credit_each, 2),
             round(row.other_process_fee_each, 2),
-            round(row.base_unit_price, 2),
-            round(row.unit_price, 2),
-            round(row.amount, 2),
+            round(row.base_unit_price, 4),
+            round(row.unit_price, 4),
+            round(row.amount, 4),
             "；".join(note_parts),
         ])
 

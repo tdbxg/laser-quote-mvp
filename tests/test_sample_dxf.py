@@ -3,10 +3,26 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from quote_core import QuoteRates, analyze_dxf
+from quote_core import Arc, Line, QuoteRates, analyze_dxf, build_closed_components
 
 
 SAMPLE = Path(__file__).resolve().parents[1] / "sample_data" / "sample.dxf"
+
+
+def test_arc_component_area_and_perimeter_are_exact() -> None:
+    segments = [
+        Line("CUT", 0, 5, 20, 5),
+        Arc("CUT", 20, 0, 5, 90, -90, -180),
+        Line("CUT", 20, -5, 0, -5),
+        Arc("CUT", 0, 0, 5, -90, 90, -180),
+    ]
+
+    components = build_closed_components(segments)
+
+    assert len(components) == 1
+    assert components[0].closed
+    assert math.isclose(components[0].area_mm2, 20 * 10 + math.pi * 25, rel_tol=1e-12)
+    assert math.isclose(components[0].length_mm, 40 + 2 * math.pi * 5, rel_tol=1e-12)
 
 
 def test_sample_dxf_geometry_and_metadata() -> None:
