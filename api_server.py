@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -29,6 +30,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 JOB_ROOT = Path(tempfile.gettempdir()) / "laser_quote_api_jobs"
 DOWNLOAD_NAMES = {"batch_quote.csv", "laser_quote.xlsx"}
+APP_VERSION = os.getenv("RENDER_GIT_COMMIT", "local-dev")[:7]
 
 INDEX_HTML = """<!doctype html>
 <html lang="zh-CN">
@@ -43,6 +45,7 @@ INDEX_HTML = """<!doctype html>
     .hero { background: #111827; color: white; border-radius: 12px; padding: 28px; }
     .hero h1 { margin: 0 0 10px; font-size: 30px; }
     .hero p { margin: 0; color: #d1d5db; line-height: 1.6; }
+    .version { color: #9ca3af; font-size: 13px; margin-top: 10px; }
     .panel { background: white; border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 18px; padding: 22px; }
     .grid { display: grid; gap: 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
     label { display: grid; gap: 6px; color: #374151; font-size: 14px; }
@@ -73,7 +76,7 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <main class="shell">
-    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF，先提取基础几何信息，再确认参数并计算待确认报价。</p></section>
+    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF，先提取基础几何信息，再确认参数并计算待确认报价。</p><div class="version">部署版本：__APP_VERSION__</div></section>
     <section class="panel">
       <form id="quoteForm">
         <div class="grid"><label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label></div>
@@ -382,12 +385,15 @@ def _base_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return INDEX_HTML
+def index() -> HTMLResponse:
+    return HTMLResponse(
+        INDEX_HTML.replace("__APP_VERSION__", APP_VERSION),
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @app.post("/api/analyze")
