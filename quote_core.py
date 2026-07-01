@@ -649,10 +649,8 @@ def extract_spline_segments(path: Path, include_layers: Optional[Sequence[str]] 
             skipped["unsupported_type:SPLINE"] = skipped.get("unsupported_type:SPLINE", 0) + 1
             continue
         chord_length = sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(pts, pts[1:]))
-        try:
-            curve_length = entity.construction_tool().measure(segments=2000).length
-        except Exception:
-            curve_length = chord_length
+        length_pts = [(p.x, p.y) for p in entity.flattening(0.00001)]
+        curve_length = sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(length_pts, length_pts[1:])) or chord_length
         length_scale = curve_length / chord_length if chord_length > 1e-12 and curve_length > 0 else 1.0
         for a, b in zip(pts, pts[1:]):
             chord = math.hypot(a[0] - b[0], a[1] - b[1])
