@@ -73,6 +73,14 @@ INDEX_HTML = """<!doctype html>
       <form id="quoteForm">
         <div class="grid">
           <label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label>
+        </div>
+        <div class="actions">
+          <button id="analyzeBtn" type="button">1. 提取 DXF 信息</button>
+          <span id="message" class="muted"></span>
+        </div>
+        <div id="pricingFields" style="display:none">
+          <p class="hint">先确认下方 DXF 基础信息，再修改报价参数并计算金额。这些数值是系统默认值，不是从 DXF 自动读取。</p>
+          <div class="grid">
           <label>材质 默认值<input name="material" value="Q235" /></label>
           <label>厚度 mm 默认值<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
           <label>数量 默认值<input name="quantity" type="number" step="1" value="1" /></label>
@@ -85,12 +93,12 @@ INDEX_HTML = """<!doctype html>
           <label>利润率 默认值<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
           <label>税率 默认值<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
           <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
-        </div>
-        <p class="hint">这些数值是系统默认值，不是从 DXF 自动读取。闭合板件会用材质、厚度、材料价等计算材料费；开放路径只按切割米数、穿孔价、其他工序、利润率和税率生成待确认报价。</p>
-        <div class="actions">
-          <button id="submitBtn" type="submit">开始核算</button>
-          <span id="message" class="muted"></span>
-          <span id="downloadLinks" class="links"></span>
+          </div>
+          <p class="hint">闭合板件会用材质、厚度、材料价等计算材料费；开放路径只按切割米数、穿孔价、其他工序、利润率和税率生成待确认报价。</p>
+          <div class="actions">
+            <button id="submitBtn" type="submit">2. 计算待确认报价</button>
+            <span id="downloadLinks" class="links"></span>
+          </div>
         </div>
       </form>
     </section>
@@ -116,16 +124,62 @@ INDEX_HTML = """<!doctype html>
   </main>
   <script>
     const form = document.getElementById("quoteForm");
+    const analyzeButton = document.getElementById("analyzeBtn");
     const button = document.getElementById("submitBtn");
     const message = document.getElementById("message");
     const result = document.getElementById("result");
     const downloads = document.getElementById("downloadLinks");
+    const pricingFields = document.getElementById("pricingFields");
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     function table(el, headers, rows) {
       el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" +
         rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") +
         "</tbody>";
     }
+    function renderData(data, mode) {
+      result.style.display = "block";
+      const s = data.summary;
+      const isAnalyze = mode === "analyze";
+      document.getElementById("summary").innerHTML = [
+        ["文件", s.file_count],
+        [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count],
+        [isAnalyze ? "开放路径" : "切割米数", isAnalyze ? `${s.total_open_path_length_m || 0} m` : s.total_cut_length_m + " m"],
+        [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]
+      ].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
+      const a = data.accuracy;
+      const accuracyPanel = document.getElementById("accuracyPanel");
+      accuracyPanel.className = "panel " + (a.requires_review_count ? "warn" : "ok");
+      document.getElementById("accuracyText").textContent = `${a.policy} 需人工复核文件数：${a.requires_review_count}；无报价行文件数：${a.empty_result_count}`;
+      table(document.getElementById("statusTable"), [
+        ["文件", "source_file"], ["成功", r => r.ok ? "是" : "否"], ["需复核", r => r.requires_review ? "是" : "否"],
+        ["有效轮廓", r => `${r.profiles_used_count}/${r.profiles_all_count}`], ["开放路径", r => `${Number(r.open_path_length_m || 0).toFixed(4)} m / ${r.open_path_count || 0} 组`],
+        ["跳过实体", r => JSON.stringify(r.skipped_counts || {})],
+        ["提醒/错误", r => (r.warnings || []).join("；") || r.error]
+      ], data.status_rows || []);
+      table(document.getElementById("quoteTable"), [
+        ["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"],
+        ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(2)],
+        ["金额", r => Number(r.amount || 0).toFixed(2)], ["备注", "note"]
+      ], data.quote_rows || []);
+      downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
+    }
+    analyzeButton.addEventListener("click", async () => {
+      analyzeButton.disabled = true;
+      message.textContent = "正在提取 DXF 信息...";
+      downloads.innerHTML = "";
+      try {
+        const res = await fetch("/api/analyze", { method: "POST", body: new FormData(form) });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "提取失败");
+        renderData(data, "analyze");
+        pricingFields.style.display = "block";
+        message.textContent = "DXF 信息提取完成，请确认后计算报价";
+      } catch (err) {
+        message.textContent = err.message;
+      } finally {
+        analyzeButton.disabled = false;
+      }
+    });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       button.disabled = true;
@@ -135,27 +189,7 @@ INDEX_HTML = """<!doctype html>
         const res = await fetch("/api/quote", { method: "POST", body: new FormData(form) });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || "核算失败");
-        result.style.display = "block";
-        const s = data.summary;
-        document.getElementById("summary").innerHTML = [
-          ["文件", s.file_count], ["报价行", s.quote_row_count], ["切割米数", s.total_cut_length_m + " m"], ["待确认金额", "￥" + s.total_amount]
-        ].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
-        const a = data.accuracy;
-        const accuracyPanel = document.getElementById("accuracyPanel");
-        accuracyPanel.className = "panel " + (a.requires_review_count ? "warn" : "ok");
-        document.getElementById("accuracyText").textContent = `${a.policy} 需人工复核文件数：${a.requires_review_count}；无报价行文件数：${a.empty_result_count}`;
-        table(document.getElementById("statusTable"), [
-          ["文件", "source_file"], ["成功", r => r.ok ? "是" : "否"], ["需复核", r => r.requires_review ? "是" : "否"],
-          ["有效轮廓", r => `${r.profiles_used_count}/${r.profiles_all_count}`], ["开放路径", r => `${Number(r.open_path_length_m || 0).toFixed(4)} m / ${r.open_path_count || 0} 组`],
-          ["跳过实体", r => JSON.stringify(r.skipped_counts || {})],
-          ["提醒/错误", r => (r.warnings || []).join("；") || r.error]
-        ], data.status_rows || []);
-        table(document.getElementById("quoteTable"), [
-          ["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"],
-          ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(2)],
-          ["金额", r => Number(r.amount || 0).toFixed(2)], ["备注", "note"]
-        ], data.quote_rows || []);
-        downloads.innerHTML = `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>`;
+        renderData(data, "quote");
         message.textContent = "核算完成";
       } catch (err) {
         message.textContent = err.message;
@@ -283,6 +317,35 @@ def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) ->
         result.warnings.append("开放路径已按切割费生成待确认报价；未计材料面积/重量。")
 
 
+async def _save_uploads(files: List[UploadFile], job_dir: Path) -> List[Path]:
+    upload_dir = job_dir / "uploads"
+    upload_dir.mkdir()
+    saved_paths: List[Path] = []
+    for upload in files:
+        filename = _safe_name(upload.filename or "upload.dxf")
+        if not filename.lower().endswith(".dxf"):
+            raise HTTPException(status_code=400, detail=f"{filename} 不是 DXF 文件")
+        path = upload_dir / filename
+        path.write_bytes(await upload.read())
+        saved_paths.append(path)
+    return saved_paths
+
+
+def _base_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
+    return {
+        "file_count": len(batch.items),
+        "ok_count": batch.ok_count,
+        "error_count": batch.error_count,
+        "quote_row_count": 0,
+        "total_cut_length_m": 0,
+        "total_pierce_count": 0,
+        "total_amount": 0,
+        "total_profiles": sum(item.result.profiles_all_count for item in batch.items if item.result),
+        "total_open_path_count": sum(item.result.open_path_count for item in batch.items if item.result),
+        "total_open_path_length_m": round(sum(item.result.open_path_length_m for item in batch.items if item.result), 4),
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -291,6 +354,24 @@ def health() -> Dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
+
+
+@app.post("/api/analyze")
+async def analyze(files: List[UploadFile] = File(...)) -> Dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
+    JOB_ROOT.mkdir(parents=True, exist_ok=True)
+    job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
+    saved_paths = await _save_uploads(files, job_dir)
+    batch = analyze_dxf_batch(saved_paths, rates=QuoteRates(), dedupe_identical=True)
+    return {
+        "job_id": job_dir.name,
+        "summary": _base_summary(batch),
+        "accuracy": _accuracy_summary(batch),
+        "status_rows": _status_rows(batch),
+        "quote_rows": [],
+        "raw": asdict(batch),
+    }
 
 
 @app.post("/api/quote")
@@ -316,16 +397,7 @@ async def quote(
 
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
-    upload_dir = job_dir / "uploads"
-    upload_dir.mkdir()
-    saved_paths: List[Path] = []
-    for upload in files:
-        filename = _safe_name(upload.filename or "upload.dxf")
-        if not filename.lower().endswith(".dxf"):
-            raise HTTPException(status_code=400, detail=f"{filename} 不是 DXF 文件")
-        path = upload_dir / filename
-        path.write_bytes(await upload.read())
-        saved_paths.append(path)
+    saved_paths = await _save_uploads(files, job_dir)
 
     rates = QuoteRates(
         material=material,
