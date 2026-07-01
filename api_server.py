@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 from excel_export import write_quote_xlsx
-from quote_core import AnalysisResult, BatchAnalysisResult, QuoteRates, analyze_dxf_batch, write_batch_csv
+from quote_core import AnalysisResult, BatchAnalysisResult, QuoteRates, QuoteRow, analyze_dxf_batch, write_batch_csv
 
 
 app = FastAPI(title="Laser Quote API", version="0.1.0")
@@ -83,6 +83,7 @@ INDEX_HTML = """<!doctype html>
           <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
           <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
           <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
+          <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
         </div>
         <div class="actions">
           <button id="submitBtn" type="submit">开始核算</button>
@@ -230,6 +231,52 @@ def _accuracy_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
     }
 
 
+def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) -> None:
+    for item in batch.items:
+        result = item.result
+        if not result or result.quote_rows or result.open_path_length_m <= 0:
+            continue
+        bbox = result.geometry_bbox
+        if bbox:
+            size_mm = f"{bbox[2] - bbox[0]:.1f}×{bbox[3] - bbox[1]:.1f}"
+        else:
+            size_mm = "开放路径"
+        pierce_count = max(1, result.open_path_count)
+        cut_fee = result.open_path_length_m * rates.cut_price_per_meter
+        pierce_fee = pierce_count * rates.pierce_price_each
+        base = cut_fee + pierce_fee + rates.other_process_fee_each
+        unit_price = max(rates.min_charge_each, base * (1 + rates.profit_rate) * (1 + rates.tax_rate))
+        result.quote_rows.append(
+            QuoteRow(
+                part_index=1,
+                duplicate_count=1,
+                drawing_no=result.drawing_no,
+                name=result.name or "开放路径待确认",
+                material=rates.material,
+                thickness_mm=rates.thickness_mm,
+                size_mm=size_mm,
+                hole_count=0,
+                pierce_count=pierce_count,
+                cut_length_m=result.open_path_length_m,
+                gross_area_mm2=0.0,
+                net_area_mm2=0.0,
+                gross_weight_kg=0.0,
+                net_weight_kg=0.0,
+                quantity=rates.quantity,
+                cut_fee_each=cut_fee,
+                pierce_fee_each=pierce_fee,
+                material_fee_each=0.0,
+                scrap_credit_each=0.0,
+                other_process_fee_each=rates.other_process_fee_each,
+                base_unit_price=base,
+                unit_price=unit_price,
+                amount=unit_price * rates.quantity,
+                note="开放路径按切割费生成待确认报价；未计材料面积/重量，必须人工确认",
+            )
+        )
+        result.warnings.append("开放路径已按切割费生成待确认报价；未计材料面积/重量。")
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -256,6 +303,7 @@ async def quote(
     tax_rate: float = Form(0.0),
     min_charge_each: float = Form(0.0),
     dedupe_identical: bool = Form(True),
+    quote_open_paths: bool = Form(False),
 ) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
@@ -288,6 +336,8 @@ async def quote(
         min_charge_each=min_charge_each,
     )
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical)
+    if quote_open_paths:
+        _add_open_path_review_rows(batch, rates)
     csv_path = job_dir / "batch_quote.csv"
     xlsx_path = job_dir / "laser_quote.xlsx"
     write_batch_csv(batch, csv_path)
