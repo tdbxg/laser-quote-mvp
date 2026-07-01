@@ -57,6 +57,7 @@ INDEX_HTML = """<!doctype html>
     th, td { border-bottom: 1px solid #e5e7eb; font-size: 13px; padding: 10px 8px; text-align: left; vertical-align: top; }
     th { background: #f9fafb; color: #374151; }
     .muted { color: #6b7280; }
+    .hint { color: #6b7280; font-size: 13px; line-height: 1.5; margin: 12px 0 0; }
     @media (max-width: 760px) { .grid, .summary { grid-template-columns: 1fr 1fr; } .hero h1 { font-size: 24px; } }
     @media (max-width: 520px) { .grid, .summary { grid-template-columns: 1fr; } }
   </style>
@@ -72,19 +73,20 @@ INDEX_HTML = """<!doctype html>
       <form id="quoteForm">
         <div class="grid">
           <label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label>
-          <label>材质<input name="material" value="Q235" /></label>
-          <label>厚度 mm<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
-          <label>数量<input name="quantity" type="number" step="1" value="1" /></label>
-          <label>密度 g/cm3<input name="density_g_cm3" type="number" step="0.0001" value="7.85" /></label>
-          <label>材料价 元/kg<input name="material_price_per_kg" type="number" step="0.01" value="4" /></label>
-          <label>废料价 元/kg<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
-          <label>切割价 元/m<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
-          <label>穿孔价 元/次<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
-          <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
-          <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
-          <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
+          <label>材质 默认值<input name="material" value="Q235" /></label>
+          <label>厚度 mm 默认值<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
+          <label>数量 默认值<input name="quantity" type="number" step="1" value="1" /></label>
+          <label>密度 g/cm3 默认值<input name="density_g_cm3" type="number" step="0.0001" value="7.85" /></label>
+          <label>材料价 元/kg 默认值<input name="material_price_per_kg" type="number" step="0.01" value="4" /></label>
+          <label>废料价 元/kg 默认值<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
+          <label>切割价 元/m 默认值<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
+          <label>穿孔价 元/次 默认值<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
+          <label>其他工序 元/件 默认值<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
+          <label>利润率 默认值<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
+          <label>税率 默认值<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
           <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
         </div>
+        <p class="hint">这些数值是系统默认值，不是从 DXF 自动读取。闭合板件会用材质、厚度、材料价等计算材料费；开放路径只按切割米数、穿孔价、其他工序、利润率和税率生成待确认报价。</p>
         <div class="actions">
           <button id="submitBtn" type="submit">开始核算</button>
           <span id="message" class="muted"></span>
@@ -136,7 +138,7 @@ INDEX_HTML = """<!doctype html>
         result.style.display = "block";
         const s = data.summary;
         document.getElementById("summary").innerHTML = [
-          ["文件", s.file_count], ["报价行", s.quote_row_count], ["切割米数", s.total_cut_length_m + " m"], ["合计金额", "￥" + s.total_amount]
+          ["文件", s.file_count], ["报价行", s.quote_row_count], ["切割米数", s.total_cut_length_m + " m"], ["待确认金额", "￥" + s.total_amount]
         ].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
         const a = data.accuracy;
         const accuracyPanel = document.getElementById("accuracyPanel");
@@ -274,6 +276,10 @@ def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) ->
                 note="开放路径按切割费生成待确认报价；未计材料面积/重量，必须人工确认",
             )
         )
+        result.warnings = [
+            warning for warning in result.warnings
+            if "未生成正式报价行" not in warning and "未生成正式报价" not in warning
+        ]
         result.warnings.append("开放路径已按切割费生成待确认报价；未计材料面积/重量。")
 
 
