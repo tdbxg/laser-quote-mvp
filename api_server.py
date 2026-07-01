@@ -64,62 +64,37 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <main class="shell">
-    <section class="hero">
-      <h1>激光报价助手</h1>
-      <p>上传 DXF，自动提取切割米数、孔数、毛重、净重并生成报价。带风险提示的图纸必须人工复核后才能正式报价。</p>
-    </section>
-
+    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF，先提取基础几何信息，再确认参数并计算待确认报价。</p></section>
     <section class="panel">
       <form id="quoteForm">
-        <div class="grid">
-          <label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label>
-        </div>
-        <div class="actions">
-          <button id="analyzeBtn" type="button">1. 提取 DXF 信息</button>
-          <span id="message" class="muted"></span>
-        </div>
+        <div class="grid"><label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label></div>
+        <div class="actions"><button id="analyzeBtn" type="button">1. 提取 DXF 信息</button><span id="message" class="muted"></span></div>
         <div id="pricingFields" style="display:none">
           <p class="hint">先确认下方 DXF 基础信息，再修改报价参数并计算金额。这些数值是系统默认值，不是从 DXF 自动读取。</p>
           <div class="grid">
-          <label>材质 默认值<input name="material" value="Q235" /></label>
-          <label>厚度 mm 默认值<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
-          <label>数量 默认值<input name="quantity" type="number" step="1" value="1" /></label>
-          <label>密度 g/cm3 默认值<input name="density_g_cm3" type="number" step="0.0001" value="7.85" /></label>
-          <label>材料价 元/kg 默认值<input name="material_price_per_kg" type="number" step="0.01" value="4" /></label>
-          <label>废料价 元/kg 默认值<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
-          <label>切割价 元/m 默认值<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
-          <label>穿孔价 元/次 默认值<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
-          <label>其他工序 元/件 默认值<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
-          <label>利润率 默认值<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
-          <label>税率 默认值<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
-          <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
+            <label>材质 默认值<input name="material" value="Q235" /></label>
+            <label>厚度 mm 默认值<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
+            <label>数量 默认值<input name="quantity" type="number" step="1" value="1" /></label>
+            <label>密度 g/cm3 默认值<input name="density_g_cm3" type="number" step="0.0001" value="7.85" /></label>
+            <label>材料价 元/kg 默认值<input name="material_price_per_kg" type="number" step="0.01" value="4" /></label>
+            <label>废料价 元/kg 默认值<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
+            <label>切割价 元/m 默认值<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
+            <label>穿孔价 元/次 默认值<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
+            <label>其他工序 元/件 默认值<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
+            <label>利润率 默认值<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
+            <label>税率 默认值<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
+            <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
           </div>
-          <p class="hint">闭合板件会用材质、厚度、材料价等计算材料费；开放路径只按切割米数、穿孔价、其他工序、利润率和税率生成待确认报价。</p>
-          <div class="actions">
-            <button id="submitBtn" type="submit">2. 计算待确认报价</button>
-            <span id="downloadLinks" class="links"></span>
-          </div>
+          <div class="actions"><button id="submitBtn" type="submit">2. 计算待确认报价</button><span id="downloadLinks" class="links"></span></div>
         </div>
       </form>
     </section>
-
     <section id="result" style="display:none">
-      <section class="panel">
-        <h2>汇总</h2>
-        <div id="summary" class="summary"></div>
-      </section>
-      <section id="accuracyPanel" class="panel">
-        <h2>准确性状态</h2>
-        <p id="accuracyText"></p>
-      </section>
-      <section class="panel">
-        <h2>文件状态</h2>
-        <div class="table-wrap"><table id="statusTable"></table></div>
-      </section>
-      <section class="panel">
-        <h2>报价明细</h2>
-        <div class="table-wrap"><table id="quoteTable"></table></div>
-      </section>
+      <section class="panel"><h2>汇总</h2><div id="summary" class="summary"></div></section>
+      <section id="accuracyPanel" class="panel"><h2>准确性状态</h2><p id="accuracyText"></p></section>
+      <section class="panel"><h2>基础几何信息</h2><div class="table-wrap"><table id="geometryTable"></table></div></section>
+      <section class="panel"><h2>文件状态</h2><div class="table-wrap"><table id="statusTable"></table></div></section>
+      <section class="panel"><h2>报价明细</h2><div class="table-wrap"><table id="quoteTable"></table></div></section>
     </section>
   </main>
   <script>
@@ -131,72 +106,19 @@ INDEX_HTML = """<!doctype html>
     const downloads = document.getElementById("downloadLinks");
     const pricingFields = document.getElementById("pricingFields");
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-    function table(el, headers, rows) {
-      el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" +
-        rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") +
-        "</tbody>";
-    }
+    function table(el, headers, rows) { el.innerHTML = "<thead><tr>" + headers.map(h => `<th>${esc(h[0])}</th>`).join("") + "</tr></thead><tbody>" + rows.map(r => "<tr>" + headers.map(h => `<td>${esc(typeof h[1] === "function" ? h[1](r) : r[h[1]])}</td>`).join("") + "</tr>").join("") + "</tbody>"; }
     function renderData(data, mode) {
       result.style.display = "block";
-      const s = data.summary;
-      const isAnalyze = mode === "analyze";
-      document.getElementById("summary").innerHTML = [
-        ["文件", s.file_count],
-        [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count],
-        [isAnalyze ? "开放路径" : "切割米数", isAnalyze ? `${s.total_open_path_length_m || 0} m` : s.total_cut_length_m + " m"],
-        [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]
-      ].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
-      const a = data.accuracy;
-      const accuracyPanel = document.getElementById("accuracyPanel");
-      accuracyPanel.className = "panel " + (a.requires_review_count ? "warn" : "ok");
-      document.getElementById("accuracyText").textContent = `${a.policy} 需人工复核文件数：${a.requires_review_count}；无报价行文件数：${a.empty_result_count}`;
-      table(document.getElementById("statusTable"), [
-        ["文件", "source_file"], ["成功", r => r.ok ? "是" : "否"], ["需复核", r => r.requires_review ? "是" : "否"],
-        ["有效轮廓", r => `${r.profiles_used_count}/${r.profiles_all_count}`], ["开放路径", r => `${Number(r.open_path_length_m || 0).toFixed(4)} m / ${r.open_path_count || 0} 组`],
-        ["跳过实体", r => JSON.stringify(r.skipped_counts || {})],
-        ["提醒/错误", r => (r.warnings || []).join("；") || r.error]
-      ], data.status_rows || []);
-      table(document.getElementById("quoteTable"), [
-        ["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"],
-        ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(2)],
-        ["金额", r => Number(r.amount || 0).toFixed(2)], ["备注", "note"]
-      ], data.quote_rows || []);
+      const s = data.summary, isAnalyze = mode === "analyze";
+      document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "有效轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "总面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
+      const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = `${a.policy} 需人工复核文件数：${a.requires_review_count}；无报价行文件数：${a.empty_result_count}`;
+      table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["需确认", r => r.approximate ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["边界框", r => (r.bbox || []).map(v => Number(v).toFixed(4)).join(" , ")], ["质心", r => r.centroid ? r.centroid.map(v => Number(v).toFixed(4)).join(" , ") : ""], ["惯性矩 X/Y mm⁴", r => `${Number(r.inertia_centroid_x_mm4 || 0).toFixed(4)} / ${Number(r.inertia_centroid_y_mm4 || 0).toFixed(4)}`], ["惯性积 XY mm⁴", r => r.inertia_centroid_xy_mm4 == null ? "" : Number(r.inertia_centroid_xy_mm4).toFixed(4)], ["回转半径 X/Y mm", r => `${Number(r.radius_gyration_x_mm || 0).toFixed(4)} / ${Number(r.radius_gyration_y_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
+      table(document.getElementById("statusTable"), [["文件", "source_file"], ["成功", r => r.ok ? "是" : "否"], ["需复核", r => r.requires_review ? "是" : "否"], ["有效轮廓", r => `${r.profiles_used_count}/${r.profiles_all_count}`], ["开放路径", r => `${Number(r.open_path_length_m || 0).toFixed(4)} m / ${r.open_path_count || 0} 组`], ["跳过实体", r => JSON.stringify(r.skipped_counts || {})], ["提醒/错误", r => (r.warnings || []).join("；") || r.error]], data.status_rows || []);
+      table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(2)], ["金额", r => Number(r.amount || 0).toFixed(2)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
     }
-    analyzeButton.addEventListener("click", async () => {
-      analyzeButton.disabled = true;
-      message.textContent = "正在提取 DXF 信息...";
-      downloads.innerHTML = "";
-      try {
-        const res = await fetch("/api/analyze", { method: "POST", body: new FormData(form) });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "提取失败");
-        renderData(data, "analyze");
-        pricingFields.style.display = "block";
-        message.textContent = "DXF 信息提取完成，请确认后计算报价";
-      } catch (err) {
-        message.textContent = err.message;
-      } finally {
-        analyzeButton.disabled = false;
-      }
-    });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      button.disabled = true;
-      message.textContent = "正在上传并核算...";
-      downloads.innerHTML = "";
-      try {
-        const res = await fetch("/api/quote", { method: "POST", body: new FormData(form) });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "核算失败");
-        renderData(data, "quote");
-        message.textContent = "核算完成";
-      } catch (err) {
-        message.textContent = err.message;
-      } finally {
-        button.disabled = false;
-      }
-    });
+    analyzeButton.addEventListener("click", async () => { analyzeButton.disabled = true; message.textContent = "正在提取 DXF 信息..."; downloads.innerHTML = ""; try { const res = await fetch("/api/analyze", { method: "POST", body: new FormData(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.detail || "提取失败"); renderData(data, "analyze"); pricingFields.style.display = "block"; message.textContent = "DXF 信息提取完成，请确认后计算报价"; } catch (err) { message.textContent = err.message; } finally { analyzeButton.disabled = false; } });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; message.textContent = "正在上传并核算..."; downloads.innerHTML = ""; try { const res = await fetch("/api/quote", { method: "POST", body: new FormData(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.detail || "核算失败"); renderData(data, "quote"); message.textContent = "核算完成"; } catch (err) { message.textContent = err.message; } finally { button.disabled = false; } });
   </script>
 </body>
 </html>"""
@@ -215,21 +137,19 @@ def _status_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for item in batch.items:
         result = item.result
-        rows.append(
-            {
-                "source_file": Path(item.source_file).name,
-                "ok": item.ok,
-                "requires_review": bool(result and _result_requires_review(result)),
-                "profiles_all_count": result.profiles_all_count if result else 0,
-                "profiles_used_count": result.profiles_used_count if result else 0,
-                "open_path_count": result.open_path_count if result else 0,
-                "open_path_length_m": result.open_path_length_m if result else 0,
-                "quote_row_count": len(result.quote_rows) if result else 0,
-                "skipped_counts": result.skipped_counts if result else {},
-                "warnings": result.warnings if result else [],
-                "error": item.error,
-            }
-        )
+        rows.append({
+            "source_file": Path(item.source_file).name,
+            "ok": item.ok,
+            "requires_review": bool(result and _result_requires_review(result)),
+            "profiles_all_count": result.profiles_all_count if result else 0,
+            "profiles_used_count": result.profiles_used_count if result else 0,
+            "open_path_count": result.open_path_count if result else 0,
+            "open_path_length_m": result.open_path_length_m if result else 0,
+            "quote_row_count": len(result.quote_rows) if result else 0,
+            "skipped_counts": result.skipped_counts if result else {},
+            "warnings": result.warnings if result else [],
+            "error": item.error,
+        })
     return rows
 
 
@@ -240,6 +160,18 @@ def _quote_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
             continue
         for row in item.result.quote_rows:
             data = row.as_dict()
+            data["source_file"] = Path(item.source_file).name
+            rows.append(data)
+    return rows
+
+
+def _geometry_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in batch.items:
+        if not item.result:
+            continue
+        for geometry in item.result.basic_geometries:
+            data = asdict(geometry)
             data["source_file"] = Path(item.source_file).name
             rows.append(data)
     return rows
@@ -257,14 +189,7 @@ def _accuracy_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
         if not item.result.quote_rows:
             empty_count += 1
         open_path_length_m += item.result.open_path_length_m
-    return {
-        "policy": "自动结果只能作为待确认报价；存在警告、跳过实体、重复视图或无报价行时必须人工复核。",
-        "requires_review_count": review_count,
-        "empty_result_count": empty_count,
-        "open_path_length_m": round(open_path_length_m, 6),
-        "supported_entities": ["LINE", "ARC", "CIRCLE", "LWPOLYLINE", "SPLINE"],
-        "unsupported_entities_action": "出现在 skipped_counts 中的实体没有计入切割米数，正式报价前必须回到 CAD 或预览页核对。",
-    }
+    return {"policy": "自动结果只能作为待确认报价；存在警告、跳过实体、重复视图或无报价行时必须人工复核。", "requires_review_count": review_count, "empty_result_count": empty_count, "open_path_length_m": round(open_path_length_m, 6), "supported_entities": ["LINE", "ARC", "CIRCLE", "LWPOLYLINE", "SPLINE"], "unsupported_entities_action": "出现在 skipped_counts 中的实体没有计入切割米数，正式报价前必须回到 CAD 或预览页核对。"}
 
 
 def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) -> None:
@@ -273,47 +198,14 @@ def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) ->
         if not result or result.quote_rows or result.open_path_length_m <= 0:
             continue
         bbox = result.geometry_bbox
-        if bbox:
-            size_mm = f"{bbox[2] - bbox[0]:.1f}×{bbox[3] - bbox[1]:.1f}"
-        else:
-            size_mm = "开放路径"
+        size_mm = f"{bbox[2] - bbox[0]:.1f}×{bbox[3] - bbox[1]:.1f}" if bbox else "开放路径"
         pierce_count = max(1, result.open_path_count)
         cut_fee = result.open_path_length_m * rates.cut_price_per_meter
         pierce_fee = pierce_count * rates.pierce_price_each
         base = cut_fee + pierce_fee + rates.other_process_fee_each
         unit_price = max(rates.min_charge_each, base * (1 + rates.profit_rate) * (1 + rates.tax_rate))
-        result.quote_rows.append(
-            QuoteRow(
-                part_index=1,
-                duplicate_count=1,
-                drawing_no=result.drawing_no,
-                name=result.name or "开放路径待确认",
-                material=rates.material,
-                thickness_mm=rates.thickness_mm,
-                size_mm=size_mm,
-                hole_count=0,
-                pierce_count=pierce_count,
-                cut_length_m=result.open_path_length_m,
-                gross_area_mm2=0.0,
-                net_area_mm2=0.0,
-                gross_weight_kg=0.0,
-                net_weight_kg=0.0,
-                quantity=rates.quantity,
-                cut_fee_each=cut_fee,
-                pierce_fee_each=pierce_fee,
-                material_fee_each=0.0,
-                scrap_credit_each=0.0,
-                other_process_fee_each=rates.other_process_fee_each,
-                base_unit_price=base,
-                unit_price=unit_price,
-                amount=unit_price * rates.quantity,
-                note="开放路径按切割费生成待确认报价；未计材料面积/重量，必须人工确认",
-            )
-        )
-        result.warnings = [
-            warning for warning in result.warnings
-            if "未生成正式报价行" not in warning and "未生成正式报价" not in warning
-        ]
+        result.quote_rows.append(QuoteRow(1, 1, result.drawing_no, result.name or "开放路径待确认", rates.material, rates.thickness_mm, size_mm, 0, pierce_count, result.open_path_length_m, 0.0, 0.0, 0.0, 0.0, rates.quantity, cut_fee, pierce_fee, 0.0, 0.0, rates.other_process_fee_each, base, unit_price, unit_price * rates.quantity, "开放路径按切割费生成待确认报价；未计材料面积/重量，必须人工确认"))
+        result.warnings = [w for w in result.warnings if "未生成正式报价" not in w]
         result.warnings.append("开放路径已按切割费生成待确认报价；未计材料面积/重量。")
 
 
@@ -332,18 +224,8 @@ async def _save_uploads(files: List[UploadFile], job_dir: Path) -> List[Path]:
 
 
 def _base_summary(batch: BatchAnalysisResult) -> Dict[str, Any]:
-    return {
-        "file_count": len(batch.items),
-        "ok_count": batch.ok_count,
-        "error_count": batch.error_count,
-        "quote_row_count": 0,
-        "total_cut_length_m": 0,
-        "total_pierce_count": 0,
-        "total_amount": 0,
-        "total_profiles": sum(item.result.profiles_all_count for item in batch.items if item.result),
-        "total_open_path_count": sum(item.result.open_path_count for item in batch.items if item.result),
-        "total_open_path_length_m": round(sum(item.result.open_path_length_m for item in batch.items if item.result), 4),
-    }
+    geometries = [g for item in batch.items if item.result for g in item.result.basic_geometries]
+    return {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": 0, "total_cut_length_m": 0, "total_pierce_count": 0, "total_amount": 0, "total_profiles": sum(item.result.profiles_all_count for item in batch.items if item.result), "total_open_path_count": sum(item.result.open_path_count for item in batch.items if item.result), "total_open_path_length_m": round(sum(item.result.open_path_length_m for item in batch.items if item.result), 4), "total_area_mm2": round(sum(g.area_mm2 for g in geometries), 4), "total_perimeter_mm": round(sum(g.perimeter_mm for g in geometries), 4)}
 
 
 @app.get("/health")
@@ -362,57 +244,18 @@ async def analyze(files: List[UploadFile] = File(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
-    saved_paths = await _save_uploads(files, job_dir)
-    batch = analyze_dxf_batch(saved_paths, rates=QuoteRates(), dedupe_identical=True)
-    return {
-        "job_id": job_dir.name,
-        "summary": _base_summary(batch),
-        "accuracy": _accuracy_summary(batch),
-        "status_rows": _status_rows(batch),
-        "quote_rows": [],
-        "raw": asdict(batch),
-    }
+    batch = analyze_dxf_batch(await _save_uploads(files, job_dir), rates=QuoteRates(), dedupe_identical=True)
+    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": [], "raw": asdict(batch)}
 
 
 @app.post("/api/quote")
-async def quote(
-    files: List[UploadFile] = File(...),
-    material: str = Form("Q235"),
-    thickness_mm: float = Form(10.0),
-    quantity: int = Form(1),
-    density_g_cm3: float = Form(7.85),
-    material_price_per_kg: float = Form(4.0),
-    scrap_price_per_kg: float = Form(2.0),
-    cut_price_per_meter: float = Form(5.0),
-    pierce_price_each: float = Form(0.0),
-    other_process_fee_each: float = Form(0.0),
-    profit_rate: float = Form(0.0),
-    tax_rate: float = Form(0.0),
-    min_charge_each: float = Form(0.0),
-    dedupe_identical: bool = Form(True),
-    quote_open_paths: bool = Form(False),
-) -> Dict[str, Any]:
+async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
-
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     saved_paths = await _save_uploads(files, job_dir)
-
-    rates = QuoteRates(
-        material=material,
-        thickness_mm=thickness_mm,
-        quantity=quantity,
-        density_g_cm3=density_g_cm3,
-        material_price_per_kg=material_price_per_kg,
-        scrap_price_per_kg=scrap_price_per_kg,
-        cut_price_per_meter=cut_price_per_meter,
-        pierce_price_each=pierce_price_each,
-        other_process_fee_each=other_process_fee_each,
-        profit_rate=profit_rate,
-        tax_rate=tax_rate,
-        min_charge_each=min_charge_each,
-    )
+    rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical)
     if quote_open_paths:
         _add_open_path_review_rows(batch, rates)
@@ -420,31 +263,11 @@ async def quote(
     xlsx_path = job_dir / "laser_quote.xlsx"
     write_batch_csv(batch, csv_path)
     write_quote_xlsx(batch, xlsx_path)
-
     amount = sum(row.amount for row in batch.quote_rows)
     cut_m = sum(row.cut_length_m * row.quantity for row in batch.quote_rows)
     pierces = sum(row.pierce_count * row.quantity for row in batch.quote_rows)
     job_id = job_dir.name
-    return {
-        "job_id": job_id,
-        "summary": {
-            "file_count": len(batch.items),
-            "ok_count": batch.ok_count,
-            "error_count": batch.error_count,
-            "quote_row_count": len(batch.quote_rows),
-            "total_cut_length_m": round(cut_m, 4),
-            "total_pierce_count": pierces,
-            "total_amount": round(amount, 2),
-        },
-        "accuracy": _accuracy_summary(batch),
-        "status_rows": _status_rows(batch),
-        "quote_rows": _quote_rows(batch),
-        "raw": asdict(batch),
-        "downloads": {
-            "csv": f"/api/jobs/{job_id}/batch_quote.csv",
-            "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx",
-        },
-    }
+    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 2)}, "accuracy": _accuracy_summary(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "raw": asdict(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
 
 
 @app.get("/api/jobs/{job_id}/{filename}")
