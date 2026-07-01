@@ -590,6 +590,10 @@ def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> Li
         ordered = order_component_points([segments[i] for i in seg_indices], tol) if closed else []
         if not ordered:
             ordered = [pt for i in seg_indices for pt in segments[i].points()]
+        if not closed and len(ordered) >= 3:
+            endpoint_gap = math.hypot(ordered[0][0] - ordered[-1][0], ordered[0][1] - ordered[-1][1])
+            if endpoint_gap <= max(tol, 0.5) and shoelace_area(ordered) > 1:
+                closed = True
         length = sum(segments[i].length() for i in seg_indices)
         result.append(PathComponent([segments[i] for i in seg_indices], ordered, length, shoelace_area(ordered) if closed else 0.0, bbox_of_points(ordered), closed))
     return result
@@ -675,6 +679,8 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     geometry_bbox = bbox_of_points(all_points) if all_points else None
     profiles = assign_profiles(segments, circles)
     warnings: List[str] = []
+    if skipped_counts.get("approx_type:SPLINE"):
+        warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
     if not profiles:
         warnings.append("未识别到闭合外轮廓，请检查 DXF 是否为 1:1 展开切割图，或切割线是否在被过滤图层。")
         if open_components:
