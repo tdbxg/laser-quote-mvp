@@ -80,7 +80,7 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <main class="shell">
-    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF，先提取基础几何信息，再确认参数并计算待确认报价。</p><div class="version">部署版本：__APP_VERSION__</div></section>
+    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF 提取基础几何信息；正式报价以 CAD/MASSPROP 复核面积、周长和穿孔数为准。</p><div class="version">部署版本：__APP_VERSION__</div></section>
     <section class="panel">
       <form id="quoteForm">
         <div class="grid"><label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label></div>
@@ -90,7 +90,7 @@ INDEX_HTML = """<!doctype html>
         <input name="select_max_y" type="hidden" />
         <div class="actions"><button id="analyzeBtn" type="button">1. 提取 DXF 信息</button><span id="message" class="muted"></span></div>
         <div id="pricingFields" style="display:none">
-          <p class="hint">先确认下方 DXF 基础信息，再修改报价参数并计算金额。</p>
+          <p class="hint">自动 DXF 结果只作预览；正式报价必须填写 CAD 复核面积和周长。</p>
           <div class="grid">
             <label>材质<input name="material" value="Q235" /></label>
             <label>厚度 mm<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
@@ -104,18 +104,18 @@ INDEX_HTML = """<!doctype html>
             <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
             <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
             <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
-            <label>CAD 面积 mm²<input name="manual_area_mm2" type="number" step="0.0001" placeholder="MASSPROP 面积" /></label>
-            <label>CAD 周长 mm<input name="manual_perimeter_mm" type="number" step="0.0001" placeholder="MASSPROP 周长" /></label>
+            <label>CAD 面积 mm²<input name="manual_area_mm2" type="number" step="0.0001" placeholder="MASSPROP 面积" required /></label>
+            <label>CAD 周长 mm<input name="manual_perimeter_mm" type="number" step="0.0001" placeholder="MASSPROP 周长" required /></label>
             <label>CAD 穿孔数<input name="manual_pierce_count" type="number" step="1" min="0" placeholder="人工确认" /></label>
             <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
           </div>
-          <div class="actions"><button id="submitBtn" type="submit">2. 计算待确认报价</button><span id="downloadLinks" class="links"></span></div>
+          <div class="actions"><button id="submitBtn" type="submit">2. 按 CAD 复核数据报价</button><span id="downloadLinks" class="links"></span></div>
         </div>
       </form>
     </section>
     <section id="result" style="display:none">
       <section class="panel"><h2>汇总</h2><div id="summary" class="summary"></div></section>
-      <section class="panel"><h2>图纸预览</h2><p class="hint">拖拽框选有效切割区域后，再次点击“提取 DXF 信息”或“计算待确认报价”。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><div class="preview-tools"><button id="zoomIn" class="secondary icon-btn" type="button" title="放大">+</button><button id="zoomOut" class="secondary icon-btn" type="button" title="缩小">-</button><button id="resetView" class="secondary icon-btn" type="button" title="重置视图">重置</button></div><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
+      <section class="panel"><h2>图纸预览</h2><p class="hint">预览用于核对和框选有效区域；正式报价不使用自动面积，使用上方 CAD 复核数据。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><div class="preview-tools"><button id="zoomIn" class="secondary icon-btn" type="button" title="放大">+</button><button id="zoomOut" class="secondary icon-btn" type="button" title="缩小">-</button><button id="resetView" class="secondary icon-btn" type="button" title="重置视图">重置</button></div><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
       <section id="accuracyPanel" class="panel"><h2>复核提示</h2><p id="accuracyText"></p></section>
       <section class="panel"><h2>基础几何信息</h2><div class="table-wrap"><table id="geometryTable"></table></div></section>
       <section class="panel"><h2>报价明细</h2><div class="table-wrap"><table id="quoteTable"></table></div></section>
@@ -144,7 +144,7 @@ INDEX_HTML = """<!doctype html>
         (r.review_notes || []).forEach(note => messages.push(`${r.source_file}：${note}`));
       });
       if (messages.length) return messages.join("；");
-      return "已识别有效轮廓。自动结果仍建议与原图人工核对后再作为正式报价。";
+      return "已提取 DXF 基础信息；正式报价以 CAD 复核面积、周长和穿孔数为准。";
     }
     async function readResponse(res, fallback) {
       const text = await res.text();
@@ -443,8 +443,11 @@ def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, p
 
 
 def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manual_area_mm2: Optional[float], manual_perimeter_mm: Optional[float], manual_pierce_count: Optional[int]) -> bool:
+    for item in batch.items:
+        if item.result:
+            item.result.quote_rows.clear()
     if manual_area_mm2 is None and manual_perimeter_mm is None and manual_pierce_count is None:
-        return False
+        raise HTTPException(status_code=400, detail="正式报价必须填写 CAD 面积 mm² 和 CAD 周长 mm；自动 DXF 结果只作预览，不直接生成报价")
     if manual_area_mm2 is None or manual_perimeter_mm is None:
         raise HTTPException(status_code=400, detail="使用 CAD 复核报价时，必须同时填写 CAD 面积 mm² 和 CAD 周长 mm")
     area = float(manual_area_mm2)
@@ -456,7 +459,6 @@ def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manua
     for item in batch.items:
         if not item.result:
             continue
-        item.result.quote_rows.clear()
         item.result.warnings.append("已使用人工确认 CAD 面积/周长生成报价，自动 DXF 解析结果仅作预览和复核参考。")
         if not first_applied:
             item.result.quote_rows.append(_manual_quote_row(rates, area, perimeter, pierce_count, Path(item.source_file).name, item.result.drawing_no, item.result.name))
@@ -526,7 +528,7 @@ async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"
     rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, point_mark_diameter_mm=point_mark_diameter_mm, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
     manual_applied = _apply_manual_cad_quote(batch, rates, manual_area_mm2, manual_perimeter_mm, manual_pierce_count)
-    if quote_open_paths:
+    if quote_open_paths and not manual_applied:
         _add_open_path_review_rows(batch, rates)
     csv_path = job_dir / "batch_quote.csv"
     xlsx_path = job_dir / "laser_quote.xlsx"

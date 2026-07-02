@@ -48,7 +48,7 @@ def test_analyze_api_returns_geometry_without_pricing() -> None:
     assert "downloads" not in data
 
 
-def test_quote_api_returns_traceable_result_and_downloads() -> None:
+def test_quote_api_rejects_pricing_without_manual_cad_values() -> None:
     client = TestClient(app)
 
     response = client.post(
@@ -65,17 +65,8 @@ def test_quote_api_returns_traceable_result_and_downloads() -> None:
         },
     )
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["summary"]["quote_row_count"] == 1
-    assert data["quote_rows"][0]["drawing_no"] == "400V2-BFD-009"
-    assert data["status_rows"][0]["requires_review"] is False
-    assert data["accuracy"]["requires_review_count"] == 0
-    assert data["downloads"]["xlsx"].endswith("/laser_quote.xlsx")
-
-    xlsx_response = client.get(data["downloads"]["xlsx"])
-    assert xlsx_response.status_code == 200
-    assert xlsx_response.content.startswith(b"PK")
+    assert response.status_code == 400
+    assert "CAD 面积" in response.json()["detail"]
 
 
 def test_quote_api_can_use_manual_cad_massprop_values() -> None:
@@ -106,6 +97,11 @@ def test_quote_api_can_use_manual_cad_massprop_values() -> None:
     assert math.isclose(row["cut_length_m"], 9.5905885, rel_tol=1e-12)
     assert row["pierce_count"] == 99
     assert row["note"].startswith("人工确认 CAD 数据报价")
+    assert data["downloads"]["xlsx"].endswith("/laser_quote.xlsx")
+
+    xlsx_response = client.get(data["downloads"]["xlsx"])
+    assert xlsx_response.status_code == 200
+    assert xlsx_response.content.startswith(b"PK")
 
 
 def test_web_index_is_served() -> None:
