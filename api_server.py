@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from excel_export import write_quote_xlsx
-from quote_core import AUTO_QUOTE_PROFILE_LIMIT, AnalysisResult, BatchAnalysisResult, ProfilePreview, QuoteRates, QuoteRow, analyze_dxf_batch, write_batch_csv
+from quote_core import AUTO_QUOTE_PROFILE_LIMIT, KG_DENSITY_FACTOR, AnalysisResult, BatchAnalysisResult, ProfilePreview, QuoteRates, QuoteRow, analyze_dxf_batch, write_batch_csv
 
 
 app = FastAPI(title="Laser Quote API", version="0.1.0")
@@ -104,6 +104,9 @@ INDEX_HTML = """<!doctype html>
             <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
             <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
             <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
+            <label>CAD 面积 mm²<input name="manual_area_mm2" type="number" step="0.0001" placeholder="MASSPROP 面积" /></label>
+            <label>CAD 周长 mm<input name="manual_perimeter_mm" type="number" step="0.0001" placeholder="MASSPROP 周长" /></label>
+            <label>CAD 穿孔数<input name="manual_pierce_count" type="number" step="1" min="0" placeholder="人工确认" /></label>
             <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
           </div>
           <div class="actions"><button id="submitBtn" type="submit">2. 计算待确认报价</button><span id="downloadLinks" class="links"></span></div>
@@ -401,6 +404,66 @@ def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) ->
         result.warnings.append("开放路径已按切割费生成待确认报价；未计材料面积/重量。")
 
 
+def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, pierce_count: int, source_name: str, drawing_no: str = "", name: str = "") -> QuoteRow:
+    width_text = "CAD复核"
+    net_weight = area_mm2 * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
+    cut_m = perimeter_mm / 1000.0
+    cut_fee = cut_m * rates.cut_price_per_meter
+    pierce_fee = pierce_count * rates.pierce_price_each
+    material_fee = net_weight * rates.material_price_per_kg
+    base = material_fee + cut_fee + pierce_fee + rates.other_process_fee_each
+    unit_price = max(rates.min_charge_each, base * (1 + rates.profit_rate) * (1 + rates.tax_rate))
+    note = f"人工确认 CAD 数据报价；源文件 {source_name}；面积/周长来自 MASSPROP"
+    return QuoteRow(
+        1,
+        1,
+        drawing_no,
+        name or "CAD复核报价",
+        rates.material,
+        rates.thickness_mm,
+        width_text,
+        max(0, pierce_count - 1),
+        pierce_count,
+        cut_m,
+        area_mm2,
+        area_mm2,
+        net_weight,
+        net_weight,
+        rates.quantity,
+        cut_fee,
+        pierce_fee,
+        material_fee,
+        0.0,
+        rates.other_process_fee_each,
+        base,
+        unit_price,
+        unit_price * rates.quantity,
+        note,
+    )
+
+
+def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manual_area_mm2: Optional[float], manual_perimeter_mm: Optional[float], manual_pierce_count: Optional[int]) -> bool:
+    if manual_area_mm2 is None and manual_perimeter_mm is None and manual_pierce_count is None:
+        return False
+    if manual_area_mm2 is None or manual_perimeter_mm is None:
+        raise HTTPException(status_code=400, detail="使用 CAD 复核报价时，必须同时填写 CAD 面积 mm² 和 CAD 周长 mm")
+    area = float(manual_area_mm2)
+    perimeter = float(manual_perimeter_mm)
+    if area <= 0 or perimeter <= 0:
+        raise HTTPException(status_code=400, detail="CAD 面积和 CAD 周长必须大于 0")
+    pierce_count = max(0, int(manual_pierce_count or 0))
+    first_applied = False
+    for item in batch.items:
+        if not item.result:
+            continue
+        item.result.quote_rows.clear()
+        item.result.warnings.append("已使用人工确认 CAD 面积/周长生成报价，自动 DXF 解析结果仅作预览和复核参考。")
+        if not first_applied:
+            item.result.quote_rows.append(_manual_quote_row(rates, area, perimeter, pierce_count, Path(item.source_file).name, item.result.drawing_no, item.result.name))
+            first_applied = True
+    return first_applied
+
+
 async def _save_uploads(files: List[UploadFile], job_dir: Path) -> List[Path]:
     upload_dir = job_dir / "uploads"
     upload_dir.mkdir()
@@ -454,7 +517,7 @@ async def analyze(files: List[UploadFile] = File(...), select_min_x: Optional[fl
 
 
 @app.post("/api/quote")
-async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
+async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), manual_area_mm2: Optional[float] = Form(None), manual_perimeter_mm: Optional[float] = Form(None), manual_pierce_count: Optional[int] = Form(None), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
@@ -462,6 +525,7 @@ async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"
     saved_paths = await _save_uploads(files, job_dir)
     rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, point_mark_diameter_mm=point_mark_diameter_mm, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
+    manual_applied = _apply_manual_cad_quote(batch, rates, manual_area_mm2, manual_perimeter_mm, manual_pierce_count)
     if quote_open_paths:
         _add_open_path_review_rows(batch, rates)
     csv_path = job_dir / "batch_quote.csv"
@@ -472,7 +536,7 @@ async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"
     cut_m = sum(row.cut_length_m * row.quantity for row in batch.quote_rows)
     pierces = sum(row.pierce_count * row.quantity for row in batch.quote_rows)
     job_id = job_dir.name
-    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4)}, "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
+    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4), "manual_cad_quote": manual_applied}, "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
 
 
 @app.get("/api/jobs/{job_id}/{filename}")
