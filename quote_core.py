@@ -133,9 +133,23 @@ class PartProfile:
     def holes_area_mm2(self) -> float:
         return sum(h.area() for h in self.holes) + sum(h.area_mm2 for h in self.inner_paths)
 
+    def point_mark_area_mm2(self, diameter_mm: float = 0.0) -> float:
+        if diameter_mm <= 0:
+            return 0.0
+        r = diameter_mm / 2.0
+        return len(self.point_marks) * math.pi * r * r
+
+    def point_mark_cut_length_mm(self, diameter_mm: float = 0.0) -> float:
+        if diameter_mm <= 0:
+            return 0.0
+        return len(self.point_marks) * math.pi * diameter_mm
+
     @property
     def net_area_mm2(self) -> float:
         return max(0.0, self.outer_area_mm2 - self.holes_area_mm2)
+
+    def net_area_with_point_marks_mm2(self, point_mark_diameter_mm: float = 0.0) -> float:
+        return max(0.0, self.net_area_mm2 - self.point_mark_area_mm2(point_mark_diameter_mm))
 
     @property
     def gross_area_mm2(self) -> float:
@@ -144,6 +158,9 @@ class PartProfile:
     @property
     def cut_length_mm(self) -> float:
         return self.outer.length_mm + sum(h.length() for h in self.holes) + sum(p.length_mm for p in self.inner_paths)
+
+    def cut_length_with_point_marks_mm(self, point_mark_diameter_mm: float = 0.0) -> float:
+        return self.cut_length_mm + self.point_mark_cut_length_mm(point_mark_diameter_mm)
 
     @property
     def hole_count(self) -> int:
@@ -173,6 +190,7 @@ class QuoteRates:
     tax_rate: float = 0.0
     min_charge_each: float = 0.0
     quote_open_paths: bool = False
+    point_mark_diameter_mm: float = 0.0
 
 
 @dataclass
@@ -216,6 +234,7 @@ class ProfilePreview:
     hole_circles: List[Dict[str, float]]
     inner_paths: List[List[Tuple[float, float]]]
     point_marks: List[Tuple[float, float]]
+    point_mark_diameter_mm: float
     size_mm: str
     hole_count: int
     pierce_count: int
@@ -1094,8 +1113,9 @@ def deduplicate_profiles(profiles: List[PartProfile]) -> Tuple[List[PartProfile]
     return used, sizes
 
 
-def make_profile_preview(profile: PartProfile, selected_by_default: bool) -> ProfilePreview:
-    return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], [(p.x, p.y) for p in profile.point_marks], f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_mm / 1000.0, profile.gross_area_mm2, profile.net_area_mm2)
+def make_profile_preview(profile: PartProfile, selected_by_default: bool, rates: Optional[QuoteRates] = None) -> ProfilePreview:
+    point_diameter = rates.point_mark_diameter_mm if rates else 0.0
+    return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], [(p.x, p.y) for p in profile.point_marks], point_diameter, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_with_point_marks_mm(point_diameter) / 1000.0, profile.gross_area_mm2, profile.net_area_with_point_marks_mm2(point_diameter))
 
 
 def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, float]], perimeter_mm: float, bbox: Tuple[float, float, float, float], closed: bool, approximate: bool, note: str, area_override: Optional[float] = None) -> BasicGeometry:
@@ -1105,11 +1125,17 @@ def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, flo
     return BasicGeometry(index, kind, closed, approximate, area, perimeter_mm, bbox, bbox[2] - bbox[0], bbox[3] - bbox[1], centroid, None if props["ix_c"] is None else float(props["ix_c"]), None if props["iy_c"] is None else float(props["iy_c"]), None if props["ixy_c"] is None else float(props["ixy_c"]), None if props["rx"] is None else float(props["rx"]), None if props["ry"] is None else float(props["ry"]), note)
 
 
-def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequence[PathComponent]) -> List[BasicGeometry]:
+def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequence[PathComponent], rates: Optional[QuoteRates] = None) -> List[BasicGeometry]:
     out: List[BasicGeometry] = []
+    point_diameter = rates.point_mark_diameter_mm if rates else 0.0
     for profile in profiles:
-        point_note = f"；含 {len(profile.point_marks)} 个点位孔，DXF 未给孔径，未扣面积" if profile.point_marks else ""
-        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.outer.length_mm, profile.outer.bbox, True, False, f"已识别为闭合外轮廓{point_note}", profile.outer.area_mm2))
+        if profile.point_marks and point_diameter > 0:
+            point_note = f"；含 {len(profile.point_marks)} 个点位孔，按 Φ{point_diameter:g} 扣面积"
+        elif profile.point_marks:
+            point_note = f"；含 {len(profile.point_marks)} 个点位孔，DXF 未给孔径，未扣面积"
+        else:
+            point_note = ""
+        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.cut_length_with_point_marks_mm(point_diameter), profile.outer.bbox, True, False, f"已识别为闭合外轮廓{point_note}", profile.net_area_with_point_marks_mm2(point_diameter)))
     for component in open_components:
         gap = math.hypot(component.points[0][0] - component.points[-1][0], component.points[0][1] - component.points[-1][1]) if len(component.points) >= 2 else 999
         near_closed = len(component.points) >= 3 and gap <= 0.5 and shoelace_area(component.points) > 1
@@ -1119,8 +1145,9 @@ def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequ
 
 def calc_quote_row(profile: PartProfile, rates: QuoteRates, drawing_no: str = "", name: str = "") -> QuoteRow:
     gross_w = profile.gross_area_mm2 * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
-    net_w = profile.net_area_mm2 * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
-    cut_m = profile.cut_length_mm / 1000.0
+    net_area = profile.net_area_with_point_marks_mm2(rates.point_mark_diameter_mm)
+    net_w = net_area * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
+    cut_m = profile.cut_length_with_point_marks_mm(rates.point_mark_diameter_mm) / 1000.0
     cut_fee = cut_m * rates.cut_price_per_meter
     pierce_fee = profile.pierce_count * rates.pierce_price_each
     material_fee = gross_w * rates.material_price_per_kg
@@ -1130,9 +1157,11 @@ def calc_quote_row(profile: PartProfile, rates: QuoteRates, drawing_no: str = ""
     notes = []
     if profile.duplicate_count > 1:
         notes.append("检测到重复视图，已按单件去重")
-    if profile.point_marks:
+    if profile.point_marks and rates.point_mark_diameter_mm > 0:
+        notes.append(f"含 {len(profile.point_marks)} 个点位孔，按 Φ{rates.point_mark_diameter_mm:g} 扣面积/切割")
+    elif profile.point_marks:
         notes.append(f"含 {len(profile.point_marks)} 个点位孔；DXF 未给孔径，未扣孔面积")
-    return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, profile.net_area_mm2, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, price * rates.quantity, "；".join(notes))
+    return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, net_area, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, price * rates.quantity, "；".join(notes))
 
 
 def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None, selection_bbox: Optional[Tuple[float, float, float, float]] = None) -> AnalysisResult:
@@ -1178,7 +1207,9 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     if inferred_colors == [1]:
         warnings.append("检测到红色切割线，已优先按红色实体提取轮廓，忽略白色点位/绿色文字等非切割对象。")
     point_mark_count = sum(len(profile.point_marks) for profile in profiles)
-    if point_mark_count:
+    if point_mark_count and rates.point_mark_diameter_mm > 0:
+        warnings.append(f"检测到 {point_mark_count} 个 POINT 点位孔；已按 Φ{rates.point_mark_diameter_mm:g} 计入孔面积和切割周长。")
+    elif point_mark_count:
         warnings.append(f"检测到 {point_mark_count} 个 POINT 点位孔；DXF 未给孔径，已计入孔/穿孔数量但未扣面积。")
     if skipped_counts.get("unsupported_type:REGION") and not skipped_counts.get("exact_type:REGION"):
         warnings.append("文件已打开，但检测到 REGION 面域实体；当前文件没有可直接报价的边界曲线。请在 CAD 中将面域分解/炸开为 LINE、ARC、LWPOLYLINE、SPLINE 等 1:1 切割轮廓后再上传。")
@@ -1202,9 +1233,9 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     if selection_bbox is not None:
         warnings.append("已按框选区域过滤轮廓；请确认选区覆盖全部有效切割图形。")
     used = {p.index for p in profiles_used}
-    previews = [make_profile_preview(p, p.index in used) for p in profiles]
+    previews = [make_profile_preview(p, p.index in used, rates) for p in profiles]
     display_open_components = [] if profiles else open_components
-    basics = [] if selection_required else make_basic_geometries(profiles, display_open_components)
+    basics = [] if selection_required else make_basic_geometries(profiles, display_open_components, rates)
     rows = [calc_quote_row(p, rates, drawing_no, name) for p in profiles_used]
     return AnalysisResult(str(path), drawing_no, name, material_hint, texts, layer_counts, skipped_counts, profiles_all_count, len(profiles_used), len(open_components), sum(c.length_mm for c in open_components) / 1000.0, geometry_bbox, basics, duplicate_groups, previews, rows, warnings)
 

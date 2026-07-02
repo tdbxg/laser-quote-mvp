@@ -100,6 +100,7 @@ INDEX_HTML = """<!doctype html>
             <label>废料价 元/kg<input name="scrap_price_per_kg" type="number" step="0.01" value="2" /></label>
             <label>切割价 元/m<input name="cut_price_per_meter" type="number" step="0.01" value="5" /></label>
             <label>穿孔价 元/次<input name="pierce_price_each" type="number" step="0.01" value="0" /></label>
+            <label>点位孔直径 mm<input name="point_mark_diameter_mm" type="number" step="0.01" value="0" /></label>
             <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
             <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
             <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
@@ -181,7 +182,10 @@ INDEX_HTML = """<!doctype html>
           const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path)}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></path>`).join("");
           const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></circle>`).join("");
           const pointSize = Math.max(view[2], view[3]) / 700;
-          const marks = (r.point_marks || []).map(p => `<path d="M${p[0] - pointSize},${p[1]}L${p[0] + pointSize},${p[1]}M${p[0]},${p[1] - pointSize}L${p[0]},${p[1] + pointSize}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></path>`).join("");
+          const markDiameter = Number(r.point_mark_diameter_mm || 0);
+          const marks = (r.point_marks || []).map(p => markDiameter > 0
+            ? `<circle cx="${p[0]}" cy="${p[1]}" r="${markDiameter / 2}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></circle>`
+            : `<path d="M${p[0] - pointSize},${p[1]}L${p[0] + pointSize},${p[1]}M${p[0]},${p[1] - pointSize}L${p[0]},${p[1] + pointSize}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></path>`).join("");
           return outer + inners + holes + marks;
         }
         const b = r.bbox;
@@ -360,6 +364,7 @@ def _preview_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
                 "inner_paths": [_sample_points(path, 50) for path in preview.inner_paths[:8]],
                 "hole_circles": [{key: round(value, 4) for key, value in circle.items()} for circle in preview.hole_circles[:40]],
                 "point_marks": [_rounded_point(point) for point in preview.point_marks[:120]],
+                "point_mark_diameter_mm": round(preview.point_mark_diameter_mm, 4),
             })
     return rows
 
@@ -449,13 +454,13 @@ async def analyze(files: List[UploadFile] = File(...), select_min_x: Optional[fl
 
 
 @app.post("/api/quote")
-async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
+async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     saved_paths = await _save_uploads(files, job_dir)
-    rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
+    rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, point_mark_diameter_mm=point_mark_diameter_mm, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
     if quote_open_paths:
         _add_open_path_review_rows(batch, rates)

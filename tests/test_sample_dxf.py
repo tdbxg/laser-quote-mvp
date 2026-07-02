@@ -265,3 +265,10 @@ def test_point_marks_are_counted_as_unmeasured_holes(tmp_path: Path) -> None:
     assert result.quote_rows[0].pierce_count == 3
     assert "未扣孔面积" in result.quote_rows[0].note
     assert "POINT 点位孔" in " ".join(result.warnings)
+
+    priced = analyze_dxf(dxf, rates=QuoteRates(point_mark_diameter_mm=10), dedupe_identical=True)
+    row = priced.quote_rows[0]
+
+    assert math.isclose(row.net_area_mm2, 5000 - 2 * math.pi * 25, rel_tol=1e-9)
+    assert math.isclose(row.cut_length_m, (300 + 2 * math.pi * 10) / 1000, rel_tol=1e-9)
+    assert "按 Φ10" in row.note
