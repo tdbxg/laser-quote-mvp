@@ -180,7 +180,9 @@ INDEX_HTML = """<!doctype html>
           const outer = `<path d="${pointPath(r.outer_points)}" style="fill:none!important" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.78"></path>`;
           const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path)}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></path>`).join("");
           const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></circle>`).join("");
-          return outer + inners + holes;
+          const pointSize = Math.max(view[2], view[3]) / 700;
+          const marks = (r.point_marks || []).map(p => `<path d="M${p[0] - pointSize},${p[1]}L${p[0] + pointSize},${p[1]}M${p[0]},${p[1] - pointSize}L${p[0]},${p[1] + pointSize}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></path>`).join("");
+          return outer + inners + holes + marks;
         }
         const b = r.bbox;
         return `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(0.001, b[2]-b[0])}" height="${Math.max(0.001, b[3]-b[1])}" fill="none" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></rect>`;
@@ -357,6 +359,7 @@ def _preview_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
                 "outer_points": _sample_points(preview.outer_points),
                 "inner_paths": [_sample_points(path, 50) for path in preview.inner_paths[:8]],
                 "hole_circles": [{key: round(value, 4) for key, value in circle.items()} for circle in preview.hole_circles[:40]],
+                "point_marks": [_rounded_point(point) for point in preview.point_marks[:120]],
             })
     return rows
 

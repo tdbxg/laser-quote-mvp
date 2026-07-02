@@ -239,3 +239,29 @@ def test_noisy_layout_frame_is_not_treated_as_part(tmp_path: Path) -> None:
     assert len(result.basic_geometries) == 2
     assert all(g.width_mm == 80 for g in result.basic_geometries)
     assert any("疑似图框" in warning for warning in result.warnings)
+
+
+def test_point_marks_are_counted_as_unmeasured_holes(tmp_path: Path) -> None:
+    dxf = tmp_path / "point_marks.dxf"
+    dxf.write_text(
+        "\n".join([
+            "0", "SECTION", "2", "ENTITIES",
+            "0", "LWPOLYLINE", "8", "CUT", "70", "1",
+            "10", "0", "20", "0",
+            "10", "100", "20", "0",
+            "10", "100", "20", "50",
+            "10", "0", "20", "50",
+            "0", "POINT", "8", "CUT", "10", "20", "20", "20",
+            "0", "POINT", "8", "CUT", "10", "80", "20", "20",
+            "0", "ENDSEC", "0", "EOF",
+        ]),
+        encoding="utf-8",
+    )
+
+    result = analyze_dxf(dxf, rates=QuoteRates(), dedupe_identical=True)
+
+    assert result.profiles_all_count == 1
+    assert result.quote_rows[0].hole_count == 2
+    assert result.quote_rows[0].pierce_count == 3
+    assert "未扣孔面积" in result.quote_rows[0].note
+    assert "POINT 点位孔" in " ".join(result.warnings)

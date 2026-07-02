@@ -92,6 +92,13 @@ class Circle:
 
 
 @dataclass
+class PointMark:
+    layer: str
+    x: float
+    y: float
+
+
+@dataclass
 class PathComponent:
     segments: List[Line | Arc]
     points: List[Tuple[float, float]]
@@ -107,6 +114,7 @@ class PartProfile:
     outer: PathComponent
     holes: List[Circle] = field(default_factory=list)
     inner_paths: List[PathComponent] = field(default_factory=list)
+    point_marks: List[PointMark] = field(default_factory=list)
     duplicate_count: int = 1
 
     @property
@@ -139,7 +147,7 @@ class PartProfile:
 
     @property
     def hole_count(self) -> int:
-        return len(self.holes) + len(self.inner_paths)
+        return len(self.holes) + len(self.inner_paths) + len(self.point_marks)
 
     @property
     def pierce_count(self) -> int:
@@ -147,7 +155,7 @@ class PartProfile:
 
     def signature(self) -> Tuple[Any, ...]:
         minx, miny, _, _ = self.outer.bbox
-        return (round(self.width_mm, 1), round(self.height_mm, 1), round(self.outer_area_mm2, 0), round(self.outer.length_mm, 1), tuple(sorted((round(h.cx - minx, 1), round(h.cy - miny, 1), round(h.r, 1)) for h in self.holes)), tuple(sorted((round(p.area_mm2, 1), round(p.length_mm, 1)) for p in self.inner_paths)))
+        return (round(self.width_mm, 1), round(self.height_mm, 1), round(self.outer_area_mm2, 0), round(self.outer.length_mm, 1), tuple(sorted((round(h.cx - minx, 1), round(h.cy - miny, 1), round(h.r, 1)) for h in self.holes)), tuple(sorted((round(p.area_mm2, 1), round(p.length_mm, 1)) for p in self.inner_paths)), tuple(sorted((round(p.x - minx, 1), round(p.y - miny, 1)) for p in self.point_marks)))
 
 
 @dataclass
@@ -207,6 +215,7 @@ class ProfilePreview:
     outer_points: List[Tuple[float, float]]
     hole_circles: List[Dict[str, float]]
     inner_paths: List[List[Tuple[float, float]]]
+    point_marks: List[Tuple[float, float]]
     size_mm: str
     hole_count: int
     pierce_count: int
@@ -395,6 +404,21 @@ def infer_metadata(texts: Sequence[str]) -> Tuple[str, str, str]:
         if not name and re.search(r"[\u4e00-\u9fff]", compact) and any(ch in compact for ch in "板座钩梁架件盖支"):
             name = compact
     return drawing_no, name, material
+
+
+def infer_cut_colors(pairs: Sequence[Tuple[str, str]]) -> Optional[List[int]]:
+    cut_types = {"LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ELLIPSE", "REGION"}
+    color_counts: Dict[int, int] = {}
+    for ent_type, data in iter_dxf_entities(pairs, "ENTITIES"):
+        if ent_type not in cut_types:
+            continue
+        color = _int(data, "62", 256)
+        color_counts[color] = color_counts.get(color, 0) + 1
+    red_count = color_counts.get(1, 0)
+    white_count = color_counts.get(7, 0)
+    if red_count >= 8 and white_count >= red_count:
+        return [1]
+    return None
 
 
 def layer_excluded(layer: str, extra_keywords: Sequence[str] = ()) -> bool:
@@ -592,7 +616,7 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
     return segments, skipped
 
 
-def extract_region_segments(path: Path, include_layers: Optional[Sequence[str]] = None) -> Tuple[List[Line | Arc], Dict[str, int]]:
+def extract_region_segments(path: Path, include_layers: Optional[Sequence[str]] = None, include_colors: Optional[Sequence[int]] = None) -> Tuple[List[Line | Arc], Dict[str, int]]:
     try:
         os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
         import ezdxf  # type: ignore
@@ -603,12 +627,17 @@ def extract_region_segments(path: Path, include_layers: Optional[Sequence[str]] 
     except Exception:
         return [], {"unsupported_type:REGION_ACIS_READ": 1}
     include_set = set(include_layers or [])
+    color_set = set(include_colors or [])
     segments: List[Line | Arc] = []
     skipped: Dict[str, int] = {}
     for entity in doc.modelspace():
         if entity.dxftype() != "REGION":
             continue
         layer = getattr(entity.dxf, "layer", "REGION") or "REGION"
+        color = int(getattr(entity.dxf, "color", 256) or 256)
+        if color_set and color not in color_set:
+            skipped[f"skip_color:{color}"] = skipped.get(f"skip_color:{color}", 0) + 1
+            continue
         if include_set and layer not in include_set:
             skipped[f"skip_layer:{layer}"] = skipped.get(f"skip_layer:{layer}", 0) + 1
             continue
@@ -622,7 +651,7 @@ def extract_region_segments(path: Path, include_layers: Optional[Sequence[str]] 
     return segments, skipped
 
 
-def extract_spline_segments(path: Path, include_layers: Optional[Sequence[str]] = None) -> Tuple[List[Line | Arc], Dict[str, int]]:
+def extract_spline_segments(path: Path, include_layers: Optional[Sequence[str]] = None, include_colors: Optional[Sequence[int]] = None) -> Tuple[List[Line | Arc], Dict[str, int]]:
     try:
         os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
         import ezdxf  # type: ignore
@@ -633,12 +662,17 @@ def extract_spline_segments(path: Path, include_layers: Optional[Sequence[str]] 
     except Exception:
         return [], {"unsupported_type:SPLINE_EZDXF_READ": 1}
     include_set = set(include_layers or [])
+    color_set = set(include_colors or [])
     segments: List[Line | Arc] = []
     skipped: Dict[str, int] = {}
     for entity in doc.modelspace():
         if entity.dxftype() != "SPLINE":
             continue
         layer = getattr(entity.dxf, "layer", "") or ""
+        color = int(getattr(entity.dxf, "color", 256) or 256)
+        if color_set and color not in color_set:
+            skipped[f"skip_color:{color}"] = skipped.get(f"skip_color:{color}", 0) + 1
+            continue
         if include_set and layer not in include_set:
             skipped[f"skip_layer:{layer}"] = skipped.get(f"skip_layer:{layer}", 0) + 1
             continue
@@ -661,10 +695,12 @@ def extract_spline_segments(path: Path, include_layers: Optional[Sequence[str]] 
     return segments, skipped
 
 
-def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = (), include_splines: bool = True) -> Tuple[List[Line | Arc], List[Circle], Dict[str, int], Dict[str, int]]:
+def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optional[Sequence[str]] = None, exclude_layer_keywords: Sequence[str] = (), include_splines: bool = True, include_colors: Optional[Sequence[int]] = None) -> Tuple[List[Line | Arc], List[Circle], List[PointMark], Dict[str, int], Dict[str, int]]:
     include_set = set(include_layers or [])
+    color_set = set(include_colors or [])
     segments: List[Line | Arc] = []
     circles: List[Circle] = []
+    points: List[PointMark] = []
     layer_counts: Dict[str, int] = {}
     skipped: Dict[str, int] = {}
 
@@ -682,7 +718,12 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
             ent_type, data = entities[i]
             raw_layer = _last(data, "8", "")
             layer = default_layer if raw_layer in {"", "0"} and default_layer else raw_layer
+            color = _int(data, "62", 256)
             layer_counts[layer] = layer_counts.get(layer, 0) + 1
+            if color_set and color not in color_set and ent_type != "POINT":
+                skip(f"skip_color:{color}")
+                i += 1
+                continue
             if include_set and layer not in include_set:
                 skip(f"skip_layer:{layer}")
                 i += 1
@@ -707,6 +748,9 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
                     else:
                         lines = _ellipse_to_lines(layer, [("10", _last(data, "10")), ("20", _last(data, "20")), ("11", str(r)), ("21", "0"), ("40", "1"), ("41", "0"), ("42", str(math.tau))], transform)
                         segments.extend(lines)
+            elif ent_type == "POINT":
+                p = _transform_point((_float(data, "10"), _float(data, "20")), transform)
+                points.append(PointMark(layer, p[0], p[1]))
             elif ent_type == "LWPOLYLINE":
                 pts = [_transform_point(p, transform) for p in zip(_floats(data, "10"), _floats(data, "20"))]
                 if len(pts) >= 2:
@@ -768,7 +812,7 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
             i += 1
 
     add_entities(list(iter_dxf_entities(pairs, "ENTITIES")))
-    return segments, circles, layer_counts, skipped
+    return segments, circles, points, layer_counts, skipped
 
 
 def point_key(pt: Tuple[float, float], tol: float = 0.01) -> Tuple[int, int]:
@@ -956,7 +1000,7 @@ def _bbox_center(bbox: Tuple[float, float, float, float]) -> Tuple[float, float]
     return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
 
 
-def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer_area_mm2: float = 1000.0, components: Optional[Sequence[PathComponent]] = None) -> List[PartProfile]:
+def assign_profiles(segments: List[Line | Arc], circles: List[Circle], points: Sequence[PointMark] = (), min_outer_area_mm2: float = 1000.0, components: Optional[Sequence[PathComponent]] = None) -> List[PartProfile]:
     closed = [c for c in (components if components is not None else build_closed_components(segments)) if c.closed and c.area_mm2 > 1]
     eligible = sorted([c for c in closed if c.area_mm2 >= min_outer_area_mm2], key=lambda c: c.area_mm2, reverse=True)
     outers: List[PathComponent] = []
@@ -974,6 +1018,11 @@ def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer
         candidates = [p for p in profiles if _bbox_contains_point(p.outer.bbox, center) and point_in_polygon(center, p.outer.points)]
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).holes.append(circle)
+    for point in points:
+        center = (point.x, point.y)
+        candidates = [p for p in profiles if _bbox_contains_point(p.outer.bbox, center) and point_in_polygon(center, p.outer.points)]
+        if candidates:
+            min(candidates, key=lambda p: p.outer.area_mm2).point_marks.append(point)
     for comp in closed:
         if comp in outers:
             continue
@@ -999,6 +1048,20 @@ def suppress_layout_profiles(profiles: Sequence[PartProfile], selection_bbox: Op
             suppressed += 1
         else:
             kept.append(profile)
+    detailed = [profile for profile in kept if profile.hole_count > 0]
+    if detailed:
+        detail_areas = sorted(profile.outer_area_mm2 for profile in detailed)
+        detail_area = detail_areas[len(detail_areas) // 2]
+        refined: List[PartProfile] = []
+        for profile in kept:
+            aspect = profile.width_mm / profile.height_mm if profile.height_mm > 1e-9 else 999.0
+            text_like = profile.height_mm <= 120 and aspect >= 2.0
+            size_outlier = profile.hole_count == 0 and (profile.outer_area_mm2 > detail_area * 3 or profile.outer_area_mm2 < detail_area * 0.1)
+            if profile.hole_count == 0 and (text_like or size_outlier):
+                suppressed += 1
+            else:
+                refined.append(profile)
+        kept = refined or kept
     return kept or list(profiles), suppressed
 
 
@@ -1032,7 +1095,7 @@ def deduplicate_profiles(profiles: List[PartProfile]) -> Tuple[List[PartProfile]
 
 
 def make_profile_preview(profile: PartProfile, selected_by_default: bool) -> ProfilePreview:
-    return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_mm / 1000.0, profile.gross_area_mm2, profile.net_area_mm2)
+    return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], [(p.x, p.y) for p in profile.point_marks], f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_mm / 1000.0, profile.gross_area_mm2, profile.net_area_mm2)
 
 
 def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, float]], perimeter_mm: float, bbox: Tuple[float, float, float, float], closed: bool, approximate: bool, note: str, area_override: Optional[float] = None) -> BasicGeometry:
@@ -1045,7 +1108,8 @@ def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, flo
 def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequence[PathComponent]) -> List[BasicGeometry]:
     out: List[BasicGeometry] = []
     for profile in profiles:
-        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.outer.length_mm, profile.outer.bbox, True, False, "已识别为闭合外轮廓", profile.outer.area_mm2))
+        point_note = f"；含 {len(profile.point_marks)} 个点位孔，DXF 未给孔径，未扣面积" if profile.point_marks else ""
+        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.outer.length_mm, profile.outer.bbox, True, False, f"已识别为闭合外轮廓{point_note}", profile.outer.area_mm2))
     for component in open_components:
         gap = math.hypot(component.points[0][0] - component.points[-1][0], component.points[0][1] - component.points[-1][1]) if len(component.points) >= 2 else 999
         near_closed = len(component.points) >= 3 and gap <= 0.5 and shoelace_area(component.points) > 1
@@ -1063,7 +1127,12 @@ def calc_quote_row(profile: PartProfile, rates: QuoteRates, drawing_no: str = ""
     scrap_credit = max(gross_w - net_w, 0) * rates.scrap_price_per_kg
     base = material_fee - scrap_credit + cut_fee + pierce_fee + rates.other_process_fee_each
     price = max(rates.min_charge_each, base * (1 + rates.profit_rate) * (1 + rates.tax_rate))
-    return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, profile.net_area_mm2, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, price * rates.quantity, "检测到重复视图，已按单件去重" if profile.duplicate_count > 1 else "")
+    notes = []
+    if profile.duplicate_count > 1:
+        notes.append("检测到重复视图，已按单件去重")
+    if profile.point_marks:
+        notes.append(f"含 {len(profile.point_marks)} 个点位孔；DXF 未给孔径，未扣孔面积")
+    return QuoteRow(profile.index, profile.duplicate_count, drawing_no, name or f"零件{profile.index}", rates.material, rates.thickness_mm, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, cut_m, profile.gross_area_mm2, profile.net_area_mm2, gross_w, net_w, rates.quantity, cut_fee, pierce_fee, material_fee, scrap_credit, rates.other_process_fee_each, base, price, price * rates.quantity, "；".join(notes))
 
 
 def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_identical: bool = True, include_layers: Optional[Sequence[str]] = None, selection_bbox: Optional[Tuple[float, float, float, float]] = None) -> AnalysisResult:
@@ -1072,19 +1141,20 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     pairs = read_dxf_pairs(path)
     texts = extract_all_texts(pairs)
     drawing_no, name, material_hint = infer_metadata(texts)
+    inferred_colors = infer_cut_colors(pairs)
     has_spline = any(ent_type == "SPLINE" for ent_type, _ in iter_dxf_entities(pairs, "ENTITIES"))
-    segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers, include_splines=not has_spline)
+    segments, circles, points, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers, include_splines=not has_spline, include_colors=inferred_colors)
     if has_spline:
-        spline_segments, spline_skipped = extract_spline_segments(path, include_layers=include_layers)
+        spline_segments, spline_skipped = extract_spline_segments(path, include_layers=include_layers, include_colors=inferred_colors)
         if spline_segments:
             segments.extend(spline_segments)
             skipped_counts.pop("defer_type:SPLINE", None)
             for key, value in spline_skipped.items():
                 skipped_counts[key] = skipped_counts.get(key, 0) + value
         else:
-            segments, circles, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers, include_splines=True)
+            segments, circles, points, layer_counts, skipped_counts = parse_cut_entities(pairs, include_layers=include_layers, include_splines=True, include_colors=inferred_colors)
     if skipped_counts.get("unsupported_type:REGION"):
-        region_segments, region_skipped = extract_region_segments(path, include_layers=include_layers)
+        region_segments, region_skipped = extract_region_segments(path, include_layers=include_layers, include_colors=inferred_colors)
         if region_segments:
             segments.extend(region_segments)
         for key, value in region_skipped.items():
@@ -1093,7 +1163,7 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     open_components = [c for c in components if not c.closed]
     all_points = [pt for segment in segments for pt in segment.points()]
     geometry_bbox = bbox_of_points(all_points) if all_points else None
-    profiles = assign_profiles(segments, circles, components=components)
+    profiles = assign_profiles(segments, circles, points, components=components)
     if selection_bbox is not None:
         profiles = filter_profiles_by_bbox(profiles, selection_bbox)
         open_components = filter_components_by_bbox(open_components, selection_bbox)
@@ -1105,6 +1175,11 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
         warnings.append("检测到 SPLINE 曲线，已按高精度折线近似计算面积/周长；正式报价前请人工核对。")
     if skipped_counts.get("exact_type:REGION"):
         warnings.append("检测到 REGION 面域实体，已从 ACIS 边界精确还原直线/圆弧；正式报价前请人工核对外轮廓和内孔是否与图纸一致。")
+    if inferred_colors == [1]:
+        warnings.append("检测到红色切割线，已优先按红色实体提取轮廓，忽略白色点位/绿色文字等非切割对象。")
+    point_mark_count = sum(len(profile.point_marks) for profile in profiles)
+    if point_mark_count:
+        warnings.append(f"检测到 {point_mark_count} 个 POINT 点位孔；DXF 未给孔径，已计入孔/穿孔数量但未扣面积。")
     if skipped_counts.get("unsupported_type:REGION") and not skipped_counts.get("exact_type:REGION"):
         warnings.append("文件已打开，但检测到 REGION 面域实体；当前文件没有可直接报价的边界曲线。请在 CAD 中将面域分解/炸开为 LINE、ARC、LWPOLYLINE、SPLINE 等 1:1 切割轮廓后再上传。")
     if skipped_counts.get("unsupported_type:POINT") and not segments and not circles:
