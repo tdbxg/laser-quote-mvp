@@ -958,7 +958,16 @@ def _bbox_center(bbox: Tuple[float, float, float, float]) -> Tuple[float, float]
 
 def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer_area_mm2: float = 1000.0, components: Optional[Sequence[PathComponent]] = None) -> List[PartProfile]:
     closed = [c for c in (components if components is not None else build_closed_components(segments)) if c.closed and c.area_mm2 > 1]
-    outers = sorted([c for c in closed if c.area_mm2 >= min_outer_area_mm2], key=lambda c: c.area_mm2, reverse=True)
+    eligible = sorted([c for c in closed if c.area_mm2 >= min_outer_area_mm2], key=lambda c: c.area_mm2, reverse=True)
+    outers: List[PathComponent] = []
+    for comp in eligible:
+        center = _bbox_center(comp.bbox)
+        parent_candidates = [
+            outer for outer in outers
+            if _bbox_contains_bbox(outer.bbox, comp.bbox) and point_in_polygon(center, outer.points)
+        ]
+        if not parent_candidates:
+            outers.append(comp)
     profiles = [PartProfile(i + 1, outer=o) for i, o in enumerate(outers)]
     for circle in circles:
         center = (circle.cx, circle.cy)
@@ -973,6 +982,24 @@ def assign_profiles(segments: List[Line | Arc], circles: List[Circle], min_outer
         if candidates:
             min(candidates, key=lambda p: p.outer.area_mm2).inner_paths.append(comp)
     return profiles
+
+
+def suppress_layout_profiles(profiles: Sequence[PartProfile], selection_bbox: Optional[Tuple[float, float, float, float]] = None) -> Tuple[List[PartProfile], int]:
+    if selection_bbox is not None or len(profiles) < 3:
+        return list(profiles), 0
+    baseline_area = min(p.outer_area_mm2 for p in profiles)
+    if baseline_area <= 0:
+        return list(profiles), 0
+    kept: List[PartProfile] = []
+    suppressed = 0
+    for profile in profiles:
+        too_large = profile.outer_area_mm2 > baseline_area * 10
+        too_noisy = profile.hole_count >= 50
+        if too_large and too_noisy:
+            suppressed += 1
+        else:
+            kept.append(profile)
+    return kept or list(profiles), suppressed
 
 
 def filter_components_by_bbox(components: Sequence[PathComponent], selection_bbox: Optional[Tuple[float, float, float, float]]) -> List[PathComponent]:
@@ -1070,6 +1097,7 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
     if selection_bbox is not None:
         profiles = filter_profiles_by_bbox(profiles, selection_bbox)
         open_components = filter_components_by_bbox(open_components, selection_bbox)
+    profiles, suppressed_layout_count = suppress_layout_profiles(profiles, selection_bbox)
     profiles_all_count = len(profiles)
     selection_required = selection_bbox is None and profiles_all_count > AUTO_QUOTE_PROFILE_LIMIT
     warnings: List[str] = []
@@ -1090,6 +1118,8 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
             warnings.append(f"已提取开放切割路径 {len(open_components)} 组，总长约 {sum(c.length_mm for c in open_components) / 1000.0:.4f} m；未生成正式报价行，需人工确认是否按开放路径报价。")
     if selection_required:
         warnings.append(f"检测到 {profiles_all_count} 个闭合候选轮廓，疑似包含多视图、图框或标注的复杂排版图；未框选前不自动汇总面积、不生成报价，请在预览中框选有效切割区域后重新提取。")
+    if suppressed_layout_count:
+        warnings.append(f"已自动排除 {suppressed_layout_count} 个疑似图框/文字/排版假外轮廓；请对照预览确认真实切割轮廓。")
     profiles_for_quote = [] if selection_required else profiles
     profiles_used, duplicate_groups = deduplicate_profiles(profiles_for_quote) if dedupe_identical else (profiles_for_quote, [1 for _ in profiles_for_quote])
     if duplicate_groups and any(n > 1 for n in duplicate_groups):
@@ -1098,7 +1128,8 @@ def analyze_dxf(path: str | Path, rates: Optional[QuoteRates] = None, dedupe_ide
         warnings.append("已按框选区域过滤轮廓；请确认选区覆盖全部有效切割图形。")
     used = {p.index for p in profiles_used}
     previews = [make_profile_preview(p, p.index in used) for p in profiles]
-    basics = [] if selection_required else make_basic_geometries(profiles, open_components)
+    display_open_components = [] if profiles else open_components
+    basics = [] if selection_required else make_basic_geometries(profiles, display_open_components)
     rows = [calc_quote_row(p, rates, drawing_no, name) for p in profiles_used]
     return AnalysisResult(str(path), drawing_no, name, material_hint, texts, layer_counts, skipped_counts, profiles_all_count, len(profiles_used), len(open_components), sum(c.length_mm for c in open_components) / 1000.0, geometry_bbox, basics, duplicate_groups, previews, rows, warnings)
 

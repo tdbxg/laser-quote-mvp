@@ -210,3 +210,32 @@ def test_complex_layout_requires_selection_before_quote(tmp_path: Path) -> None:
     assert selected.profiles_all_count == 1
     assert len(selected.basic_geometries) == 1
     assert len(selected.quote_rows) == 1
+
+
+def test_noisy_layout_frame_is_not_treated_as_part(tmp_path: Path) -> None:
+    dxf = tmp_path / "noisy_layout_frame.dxf"
+    entities = ["0", "SECTION", "2", "ENTITIES"]
+
+    def add_rect(x: float, y: float, w: float, h: float) -> None:
+        entities.extend([
+            "0", "LWPOLYLINE", "8", "CUT", "70", "1",
+            "10", str(x), "20", str(y),
+            "10", str(x + w), "20", str(y),
+            "10", str(x + w), "20", str(y + h),
+            "10", str(x), "20", str(y + h),
+        ])
+
+    add_rect(0, 0, 1000, 500)
+    for i in range(60):
+        add_rect(20 + (i % 20) * 30, 20 + (i // 20) * 30, 10, 10)
+    add_rect(1200, 0, 80, 40)
+    add_rect(1400, 0, 80, 40)
+    entities.extend(["0", "ENDSEC", "0", "EOF"])
+    dxf.write_text("\n".join(entities), encoding="utf-8")
+
+    result = analyze_dxf(dxf, rates=QuoteRates(), dedupe_identical=False)
+
+    assert result.profiles_all_count == 2
+    assert len(result.basic_geometries) == 2
+    assert all(g.width_mm == 80 for g in result.basic_geometries)
+    assert any("疑似图框" in warning for warning in result.warnings)

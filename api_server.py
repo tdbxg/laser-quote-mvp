@@ -257,7 +257,7 @@ def _review_notes(result: AnalysisResult) -> List[str]:
         notes.append("检测到疑似重复轮廓，已按默认去重处理，请确认数量。")
     if complex_unselected:
         notes.append("复杂图预览已隐藏超大外框候选；请框选真实切割区域后重新提取。")
-    if result.open_path_count:
+    if result.open_path_count and not result.basic_geometries:
         notes.append("存在开放路径，请确认是否需要按切割路径报价。")
     for warning in result.warnings:
         if exact_region and "已从 ACIS 边界精确还原" in warning:
