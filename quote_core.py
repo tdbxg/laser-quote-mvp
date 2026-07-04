@@ -22,6 +22,7 @@ class Line:
     x2: float
     y2: float
     length_override: Optional[float] = None
+    path_id: Optional[int] = None
 
     def endpoints(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         return (self.x1, self.y1), (self.x2, self.y2)
@@ -45,6 +46,7 @@ class Arc:
     start_deg: float
     end_deg: float
     sweep_deg: Optional[float] = None
+    path_id: Optional[int] = None
 
     def _span(self) -> float:
         if self.sweep_deg is not None:
@@ -722,9 +724,15 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
     points: List[PointMark] = []
     layer_counts: Dict[str, int] = {}
     skipped: Dict[str, int] = {}
+    path_counter = 0
 
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
+
+    def next_path_id() -> int:
+        nonlocal path_counter
+        path_counter += 1
+        return path_counter
 
     blocks = _collect_blocks(pairs)
 
@@ -773,9 +781,10 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
             elif ent_type == "LWPOLYLINE":
                 pts = [_transform_point(p, transform) for p in zip(_floats(data, "10"), _floats(data, "20"))]
                 if len(pts) >= 2:
+                    path_id = next_path_id()
                     if _int(data, "70") & 1:
                         pts.append(pts[0])
-                    segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+                    segments.extend(Line(layer, a[0], a[1], b[0], b[1], path_id=path_id) for a, b in zip(pts, pts[1:]))
             elif ent_type == "POLYLINE":
                 pts: List[Tuple[float, float]] = []
                 closed = (_int(data, "70") & 1) == 1
@@ -788,9 +797,10 @@ def parse_cut_entities(pairs: Sequence[Tuple[str, str]], include_layers: Optiona
                         pts.append(_transform_point((_float(child_data, "10"), _float(child_data, "20")), transform))
                     j += 1
                 if len(pts) >= 2:
+                    path_id = next_path_id()
                     if closed:
                         pts.append(pts[0])
-                    segments.extend(Line(layer, a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+                    segments.extend(Line(layer, a[0], a[1], b[0], b[1], path_id=path_id) for a, b in zip(pts, pts[1:]))
                 else:
                     skip("unsupported_type:POLYLINE")
                 i = j
@@ -953,6 +963,34 @@ def exact_path_area(segments: List[Line | Arc], ordered: List[Tuple[int, bool]])
 
 
 def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> List[PathComponent]:
+    result: List[PathComponent] = []
+    consumed: set[int] = set()
+    path_groups: Dict[int, List[int]] = {}
+    for idx, segment in enumerate(segments):
+        path_id = getattr(segment, "path_id", None)
+        if path_id is not None:
+            path_groups.setdefault(path_id, []).append(idx)
+
+    for seg_indices in path_groups.values():
+        if len(seg_indices) < 2:
+            continue
+        component_segments = [segments[i] for i in seg_indices]
+        ordered: List[Tuple[float, float]] = []
+        for segment in component_segments:
+            seg_pts = segment.points()
+            ordered.extend(seg_pts[1:] if ordered else seg_pts)
+        if not ordered:
+            continue
+        endpoint_gap = math.hypot(ordered[0][0] - ordered[-1][0], ordered[0][1] - ordered[-1][1])
+        closed = endpoint_gap <= max(tol, 0.5) and shoelace_area(ordered) > 1
+        if not closed:
+            continue
+        ordered_segment_refs = [(local_idx, False) for local_idx in range(len(component_segments))]
+        length = sum(segment.length() for segment in component_segments)
+        area = exact_path_area(component_segments, ordered_segment_refs)
+        result.append(PathComponent(component_segments, ordered, length, area, bbox_of_points(ordered), True))
+        consumed.update(seg_indices)
+
     parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
 
     def find(a: Tuple[int, int]) -> Tuple[int, int]:
@@ -967,22 +1005,23 @@ def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> Li
         if ra != rb:
             parent[rb] = ra
 
+    remaining_indices = [idx for idx in range(len(segments)) if idx not in consumed]
     endpoints_by_seg = []
-    for seg in segments:
+    for idx in remaining_indices:
+        seg = segments[idx]
         p1, p2 = seg.endpoints()
         k1, k2 = point_key(p1, tol), point_key(p2, tol)
-        endpoints_by_seg.append((k1, k2))
+        endpoints_by_seg.append((idx, k1, k2))
         union(k1, k2)
     comps: Dict[Tuple[int, int], List[int]] = {}
-    for idx, (k1, _) in enumerate(endpoints_by_seg):
-        comps.setdefault(find(k1), []).append(idx)
-    result: List[PathComponent] = []
+    for original_idx, k1, _ in endpoints_by_seg:
+        comps.setdefault(find(k1), []).append(original_idx)
     for seg_indices in comps.values():
         if len(seg_indices) < 2:
             continue
         degree: Dict[Tuple[int, int], int] = {}
         for idx in seg_indices:
-            k1, k2 = endpoints_by_seg[idx]
+            k1, k2 = point_key(segments[idx].endpoints()[0], tol), point_key(segments[idx].endpoints()[1], tol)
             degree[k1] = degree.get(k1, 0) + 1
             degree[k2] = degree.get(k2, 0) + 1
         closed = bool(degree) and all(v == 2 for v in degree.values())

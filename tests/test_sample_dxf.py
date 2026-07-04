@@ -110,6 +110,21 @@ def test_classic_polyline_vertex_dxf_is_supported(tmp_path: Path) -> None:
     assert len(result.quote_rows) == 1
 
 
+def test_closed_polyline_keeps_source_order() -> None:
+    points = [(0, 0), (60, 0), (60, 20), (100, 20), (20, 80), (0, 50), (0, 0)]
+    segments = [
+        Line("CUT", a[0], a[1], b[0], b[1], path_id=1)
+        for a, b in zip(points, points[1:])
+    ]
+
+    components = build_closed_components(segments)
+
+    assert len(components) == 1
+    assert components[0].closed
+    assert components[0].points == points
+    assert math.isclose(components[0].area_mm2, 4500.0, rel_tol=1e-12)
+
+
 def test_insert_block_geometry_is_expanded(tmp_path: Path) -> None:
     dxf = tmp_path / "insert_block.dxf"
     dxf.write_text(
