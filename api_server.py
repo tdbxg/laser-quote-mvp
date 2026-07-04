@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -92,6 +93,7 @@ INDEX_HTML = """<!doctype html>
         <div id="pricingFields" style="display:none">
           <p class="hint">自动 DXF 结果只作预览；正式报价必须填写 CAD 复核面积和周长。</p>
           <div class="grid">
+            <label>MASSPROP 文本<input name="massprop_file" type="file" accept=".txt,.log" /></label>
             <label>材质<input name="material" value="Q235" /></label>
             <label>厚度 mm<input name="thickness_mm" type="number" step="0.01" value="10" /></label>
             <label>数量<input name="quantity" type="number" step="1" value="1" /></label>
@@ -466,6 +468,33 @@ def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manua
     return first_applied
 
 
+def _decode_text_upload(data: bytes) -> str:
+    for encoding in ("utf-8-sig", "gb18030", "big5", "latin1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _parse_massprop_text(text: str) -> Tuple[Optional[float], Optional[float]]:
+    area_match = re.search(r"(?:面积|Area)\s*[:：]\s*([-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?)", text, re.I)
+    perimeter_match = re.search(r"(?:周长|Perimeter)\s*[:：]\s*([-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?)", text, re.I)
+    area = float(area_match.group(1)) if area_match else None
+    perimeter = float(perimeter_match.group(1)) if perimeter_match else None
+    return area, perimeter
+
+
+async def _massprop_values(upload: Optional[UploadFile]) -> Tuple[Optional[float], Optional[float]]:
+    if upload is None or not upload.filename:
+        return None, None
+    text = _decode_text_upload(await upload.read())
+    area, perimeter = _parse_massprop_text(text)
+    if area is None or perimeter is None:
+        raise HTTPException(status_code=400, detail="MASSPROP 文本未识别到面积和周长，请确认文件包含“面积:”和“周长:”")
+    return area, perimeter
+
+
 async def _save_uploads(files: List[UploadFile], job_dir: Path) -> List[Path]:
     upload_dir = job_dir / "uploads"
     upload_dir.mkdir()
@@ -519,12 +548,17 @@ async def analyze(files: List[UploadFile] = File(...), select_min_x: Optional[fl
 
 
 @app.post("/api/quote")
-async def quote(files: List[UploadFile] = File(...), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), manual_area_mm2: Optional[float] = Form(None), manual_perimeter_mm: Optional[float] = Form(None), manual_pierce_count: Optional[int] = Form(None), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
+async def quote(files: List[UploadFile] = File(...), massprop_file: Optional[UploadFile] = File(None), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), manual_area_mm2: Optional[float] = Form(None), manual_perimeter_mm: Optional[float] = Form(None), manual_pierce_count: Optional[int] = Form(None), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     saved_paths = await _save_uploads(files, job_dir)
+    massprop_area, massprop_perimeter = await _massprop_values(massprop_file)
+    if massprop_area is not None:
+        manual_area_mm2 = massprop_area
+    if massprop_perimeter is not None:
+        manual_perimeter_mm = massprop_perimeter
     rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, point_mark_diameter_mm=point_mark_diameter_mm, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
     manual_applied = _apply_manual_cad_quote(batch, rates, manual_area_mm2, manual_perimeter_mm, manual_pierce_count)

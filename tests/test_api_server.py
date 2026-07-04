@@ -104,6 +104,32 @@ def test_quote_api_can_use_manual_cad_massprop_values() -> None:
     assert xlsx_response.content.startswith(b"PK")
 
 
+def test_quote_api_can_parse_uploaded_massprop_text() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/quote",
+        files=[
+            ("files", ("sample.dxf", _simple_dxf_bytes(), "application/dxf")),
+            ("massprop_file", ("massprop.txt", "面积:\n  939439.9243\n周长:\n  9590.5885\n".encode("utf-8"), "text/plain")),
+        ],
+        data={
+            "thickness_mm": "10",
+            "quantity": "1",
+            "density_g_cm3": "7.85",
+            "material_price_per_kg": "4",
+            "cut_price_per_meter": "5",
+            "pierce_price_each": "1",
+            "manual_pierce_count": "99",
+        },
+    )
+
+    assert response.status_code == 200
+    row = response.json()["quote_rows"][0]
+    assert row["net_area_mm2"] == 939439.9243
+    assert math.isclose(row["cut_length_m"], 9.5905885, rel_tol=1e-12)
+
+
 def test_web_index_is_served() -> None:
     client = TestClient(app)
 
