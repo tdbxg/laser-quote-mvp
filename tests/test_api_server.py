@@ -44,11 +44,13 @@ def test_analyze_api_returns_geometry_without_pricing() -> None:
     assert data["geometry_rows"][0]["area_mm2"] > 0
     assert data["geometry_rows"][0]["perimeter_mm"] > 0
     assert data["geometry_rows"][0]["centroid"] is not None
+    assert data["massprop_rows"][0]["area_mm2"] > 0
+    assert data["massprop_rows"][0]["perimeter_mm"] > 0
     assert data["quote_rows"] == []
     assert "downloads" not in data
 
 
-def test_quote_api_rejects_pricing_without_manual_cad_values() -> None:
+def test_quote_api_uses_auto_massprop_without_manual_cad_values() -> None:
     client = TestClient(app)
 
     response = client.post(
@@ -65,8 +67,13 @@ def test_quote_api_rejects_pricing_without_manual_cad_values() -> None:
         },
     )
 
-    assert response.status_code == 400
-    assert "CAD 面积" in response.json()["detail"]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["summary"]["quote_row_count"] == 1
+    assert data["summary"]["manual_cad_quote"] is False
+    assert data["quote_rows"][0]["net_area_mm2"] == 5000.0
+    assert data["massprop_rows"][0]["area_mm2"] == 5000.0
+    assert data["downloads"]["xlsx"].endswith("/laser_quote.xlsx")
 
 
 def test_quote_api_can_use_manual_cad_massprop_values() -> None:

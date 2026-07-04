@@ -81,7 +81,7 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <main class="shell">
-    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF 提取基础几何信息；正式报价以 CAD/MASSPROP 复核面积、周长和穿孔数为准。</p><div class="version">部署版本：__APP_VERSION__</div></section>
+    <section class="hero"><h1>激光报价助手</h1><p>上传 DXF 自动提取 MASSPROP；复杂图可用 CAD/MASSPROP 文本校准。</p><div class="version">部署版本：__APP_VERSION__</div></section>
     <section class="panel">
       <form id="quoteForm">
         <div class="grid"><label>DXF 文件<input name="files" type="file" accept=".dxf" multiple required /></label></div>
@@ -91,7 +91,7 @@ INDEX_HTML = """<!doctype html>
         <input name="select_max_y" type="hidden" />
         <div class="actions"><button id="analyzeBtn" type="button">1. 提取 DXF 信息</button><span id="message" class="muted"></span></div>
         <div id="pricingFields" style="display:none">
-          <p class="hint">自动 DXF 结果只作预览；正式报价必须填写 CAD 复核面积和周长。</p>
+          <p class="hint">默认按自动 MASSPROP 报价；上传 MASSPROP 文本或手填 CAD 面积/周长时，以校准值覆盖自动结果。</p>
           <div class="grid">
             <label>MASSPROP 文本<input name="massprop_file" type="file" accept=".txt,.log" /></label>
             <label>材质<input name="material" value="Q235" /></label>
@@ -106,19 +106,20 @@ INDEX_HTML = """<!doctype html>
             <label>其他工序 元/件<input name="other_process_fee_each" type="number" step="0.01" value="0" /></label>
             <label>利润率<input name="profit_rate" type="number" step="0.0001" value="0" /></label>
             <label>税率<input name="tax_rate" type="number" step="0.0001" value="0" /></label>
-            <label>CAD 面积 mm²<input name="manual_area_mm2" type="number" step="0.0001" placeholder="MASSPROP 面积" required /></label>
-            <label>CAD 周长 mm<input name="manual_perimeter_mm" type="number" step="0.0001" placeholder="MASSPROP 周长" required /></label>
+            <label>CAD 面积 mm²<input name="manual_area_mm2" type="number" step="0.0001" placeholder="可选校准" /></label>
+            <label>CAD 周长 mm<input name="manual_perimeter_mm" type="number" step="0.0001" placeholder="可选校准" /></label>
             <label>CAD 穿孔数<input name="manual_pierce_count" type="number" step="1" min="0" placeholder="人工确认" /></label>
             <label>开放路径<input name="quote_open_paths" type="checkbox" value="true" checked />按切割费生成待确认报价</label>
           </div>
-          <div class="actions"><button id="submitBtn" type="submit">2. 按 CAD 复核数据报价</button><span id="downloadLinks" class="links"></span></div>
+          <div class="actions"><button id="submitBtn" type="submit">2. 计算报价</button><span id="downloadLinks" class="links"></span></div>
         </div>
       </form>
     </section>
     <section id="result" style="display:none">
       <section class="panel"><h2>汇总</h2><div id="summary" class="summary"></div></section>
-      <section class="panel"><h2>图纸预览</h2><p class="hint">预览用于核对和框选有效区域；正式报价不使用自动面积，使用上方 CAD 复核数据。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><div class="preview-tools"><button id="zoomIn" class="secondary icon-btn" type="button" title="放大">+</button><button id="zoomOut" class="secondary icon-btn" type="button" title="缩小">-</button><button id="resetView" class="secondary icon-btn" type="button" title="重置视图">重置</button></div><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
+      <section class="panel"><h2>图纸预览</h2><p class="hint">预览用于核对和框选有效区域；自动 MASSPROP 可直接报价，复杂图可再用 CAD 文本校准。</p><div id="previewBox" class="preview-box"></div><div class="preview-actions"><div class="preview-tools"><button id="zoomIn" class="secondary icon-btn" type="button" title="放大">+</button><button id="zoomOut" class="secondary icon-btn" type="button" title="缩小">-</button><button id="resetView" class="secondary icon-btn" type="button" title="重置视图">重置</button></div><button id="clearSelection" class="secondary" type="button">清除框选</button><span id="selectionText" class="muted"></span></div></section>
       <section id="accuracyPanel" class="panel"><h2>复核提示</h2><p id="accuracyText"></p></section>
+      <section class="panel"><h2>自动 MASSPROP</h2><div class="table-wrap"><table id="masspropTable"></table></div></section>
       <section class="panel"><h2>基础几何信息</h2><div class="table-wrap"><table id="geometryTable"></table></div></section>
       <section class="panel"><h2>报价明细</h2><div class="table-wrap"><table id="quoteTable"></table></div></section>
     </section>
@@ -146,7 +147,7 @@ INDEX_HTML = """<!doctype html>
         (r.review_notes || []).forEach(note => messages.push(`${r.source_file}：${note}`));
       });
       if (messages.length) return messages.join("；");
-      return "已提取 DXF 基础信息；正式报价以 CAD 复核面积、周长和穿孔数为准。";
+      return "已生成自动 MASSPROP；复杂图或与 CAD 差异较大时，可上传 MASSPROP 文本校准。";
     }
     async function readResponse(res, fallback) {
       const text = await res.text();
@@ -242,6 +243,7 @@ INDEX_HTML = """<!doctype html>
       document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "候选轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "自动面积参考" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
       const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = reviewText(data);
       drawPreview(data.preview_rows || data.geometry_rows || []);
+      table(document.getElementById("masspropTable"), [["文件", "source_file"], ["对象", "object_count"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["边界框", r => r.bbox ? `X:${Number(r.bbox[0]).toFixed(4)}--${Number(r.bbox[2]).toFixed(4)} Y:${Number(r.bbox[1]).toFixed(4)}--${Number(r.bbox[3]).toFixed(4)}` : ""], ["质心", r => r.centroid ? `X:${Number(r.centroid[0]).toFixed(4)} Y:${Number(r.centroid[1]).toFixed(4)}` : ""], ["来源", "source"]], data.massprop_rows || []);
       table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["自动面积参考 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["自动周长参考 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
       table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(4)], ["金额", r => Number(r.amount || 0).toFixed(4)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
@@ -322,6 +324,38 @@ def _geometry_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
             data = asdict(geometry)
             data["source_file"] = Path(item.source_file).name
             rows.append(data)
+    return rows
+
+
+def _massprop_rows(batch: BatchAnalysisResult, source: str = "自动识别") -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in batch.items:
+        if not item.result:
+            continue
+        geometries = [g for g in item.result.basic_geometries if g.closed and g.area_mm2 > 0]
+        if not geometries:
+            continue
+        area = sum(g.area_mm2 for g in geometries)
+        perimeter = sum(g.perimeter_mm for g in geometries)
+        min_x = min(g.bbox[0] for g in geometries)
+        min_y = min(g.bbox[1] for g in geometries)
+        max_x = max(g.bbox[2] for g in geometries)
+        max_y = max(g.bbox[3] for g in geometries)
+        centroid = None
+        if area > 0 and all(g.centroid is not None for g in geometries):
+            centroid = (
+                sum((g.centroid[0] if g.centroid else 0.0) * g.area_mm2 for g in geometries) / area,
+                sum((g.centroid[1] if g.centroid else 0.0) * g.area_mm2 for g in geometries) / area,
+            )
+        rows.append({
+            "source_file": Path(item.source_file).name,
+            "object_count": len(geometries),
+            "area_mm2": area,
+            "perimeter_mm": perimeter,
+            "bbox": (min_x, min_y, max_x, max_y),
+            "centroid": centroid,
+            "source": source,
+        })
     return rows
 
 
@@ -447,11 +481,8 @@ def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, p
 
 
 def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manual_area_mm2: Optional[float], manual_perimeter_mm: Optional[float], manual_pierce_count: Optional[int], massprop_object_count: Optional[int] = None) -> bool:
-    for item in batch.items:
-        if item.result:
-            item.result.quote_rows.clear()
     if manual_area_mm2 is None and manual_perimeter_mm is None and manual_pierce_count is None:
-        raise HTTPException(status_code=400, detail="正式报价必须填写 CAD 面积 mm² 和 CAD 周长 mm；自动 DXF 结果只作预览，不直接生成报价")
+        return False
     if manual_area_mm2 is None or manual_perimeter_mm is None:
         raise HTTPException(status_code=400, detail="使用 CAD 复核报价时，必须同时填写 CAD 面积 mm² 和 CAD 周长 mm")
     area = float(manual_area_mm2)
@@ -463,6 +494,7 @@ def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manua
     for item in batch.items:
         if not item.result:
             continue
+        item.result.quote_rows.clear()
         item.result.warnings.append("已使用人工确认 CAD 面积/周长生成报价，自动 DXF 解析结果仅作预览和复核参考。")
         if not first_applied:
             item.result.quote_rows.append(_manual_quote_row(rates, area, perimeter, pierce_count, Path(item.source_file).name, item.result.drawing_no, item.result.name, massprop_object_count))
@@ -548,11 +580,11 @@ async def analyze(files: List[UploadFile] = File(...), select_min_x: Optional[fl
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     batch = analyze_dxf_batch(await _save_uploads(files, job_dir), rates=QuoteRates(), dedupe_identical=True, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
-    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": []}
+    return {"job_id": job_dir.name, "summary": _base_summary(batch), "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "massprop_rows": _massprop_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": []}
 
 
 @app.post("/api/quote")
-async def quote(files: List[UploadFile] = File(...), massprop_file: Optional[UploadFile] = File(None), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), manual_area_mm2: Optional[float] = Form(None), manual_perimeter_mm: Optional[float] = Form(None), manual_pierce_count: Optional[int] = Form(None), dedupe_identical: bool = Form(True), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
+async def quote(files: List[UploadFile] = File(...), massprop_file: Optional[UploadFile] = File(None), material: str = Form("Q235"), thickness_mm: float = Form(10.0), quantity: int = Form(1), density_g_cm3: float = Form(7.85), material_price_per_kg: float = Form(4.0), scrap_price_per_kg: float = Form(2.0), cut_price_per_meter: float = Form(5.0), pierce_price_each: float = Form(0.0), point_mark_diameter_mm: float = Form(0.0), other_process_fee_each: float = Form(0.0), profit_rate: float = Form(0.0), tax_rate: float = Form(0.0), min_charge_each: float = Form(0.0), manual_area_mm2: Optional[float] = Form(None), manual_perimeter_mm: Optional[float] = Form(None), manual_pierce_count: Optional[int] = Form(None), dedupe_identical: bool = Form(False), quote_open_paths: bool = Form(False), select_min_x: Optional[float] = Form(None), select_min_y: Optional[float] = Form(None), select_max_x: Optional[float] = Form(None), select_max_y: Optional[float] = Form(None)) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请上传至少一个 DXF 文件")
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
@@ -576,7 +608,7 @@ async def quote(files: List[UploadFile] = File(...), massprop_file: Optional[Upl
     cut_m = sum(row.cut_length_m * row.quantity for row in batch.quote_rows)
     pierces = sum(row.pierce_count * row.quantity for row in batch.quote_rows)
     job_id = job_dir.name
-    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4), "manual_cad_quote": manual_applied}, "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
+    return {"job_id": job_id, "summary": {"file_count": len(batch.items), "ok_count": batch.ok_count, "error_count": batch.error_count, "quote_row_count": len(batch.quote_rows), "total_cut_length_m": round(cut_m, 4), "total_pierce_count": pierces, "total_amount": round(amount, 4), "manual_cad_quote": manual_applied}, "accuracy": _accuracy_summary(batch), "preview_rows": _preview_rows(batch), "massprop_rows": _massprop_rows(batch), "geometry_rows": _geometry_rows(batch), "status_rows": _status_rows(batch), "quote_rows": _quote_rows(batch), "downloads": {"csv": f"/api/jobs/{job_id}/batch_quote.csv", "xlsx": f"/api/jobs/{job_id}/laser_quote.xlsx"}}
 
 
 @app.get("/api/jobs/{job_id}/{filename}")

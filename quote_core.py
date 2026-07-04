@@ -1135,7 +1135,7 @@ def make_basic_geometries(profiles: Sequence[PartProfile], open_components: Sequ
             point_note = f"；含 {len(profile.point_marks)} 个点位孔，DXF 未给孔径，未扣面积"
         else:
             point_note = ""
-        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.cut_length_with_point_marks_mm(point_diameter), profile.outer.bbox, True, False, f"自动识别参考，不用于正式报价；已识别为闭合外轮廓{point_note}", profile.net_area_with_point_marks_mm2(point_diameter)))
+        out.append(make_basic_geometry(len(out) + 1, "外轮廓", profile.outer.points, profile.cut_length_with_point_marks_mm(point_diameter), profile.outer.bbox, True, False, f"自动 MASSPROP 结果；复杂图请复核；已识别为闭合外轮廓{point_note}", profile.net_area_with_point_marks_mm2(point_diameter)))
     for component in open_components:
         gap = math.hypot(component.points[0][0] - component.points[-1][0], component.points[0][1] - component.points[-1][1]) if len(component.points) >= 2 else 999
         near_closed = len(component.points) >= 3 and gap <= 0.5 and shoelace_area(component.points) > 1
