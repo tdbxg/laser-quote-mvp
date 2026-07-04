@@ -239,10 +239,10 @@ INDEX_HTML = """<!doctype html>
     function renderData(data, mode) {
       result.style.display = "block";
       const s = data.summary, isAnalyze = mode === "analyze";
-      document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "候选轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "已确认面积" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
+      document.getElementById("summary").innerHTML = [["文件", s.file_count], [isAnalyze ? "候选轮廓" : "报价行", isAnalyze ? (s.total_profiles || 0) : s.quote_row_count], [isAnalyze ? "自动面积参考" : "切割米数", isAnalyze ? `${s.total_area_mm2 || 0} mm²` : s.total_cut_length_m + " m"], [isAnalyze ? "需复核" : "待确认金额", isAnalyze ? (data.accuracy.requires_review_count || 0) : "￥" + s.total_amount]].map(x => `<div class="metric"><span>${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
       const a = data.accuracy; document.getElementById("accuracyPanel").className = "panel " + (a.requires_review_count ? "warn" : "ok"); document.getElementById("accuracyText").textContent = reviewText(data);
       drawPreview(data.preview_rows || data.geometry_rows || []);
-      table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["面积 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["周长 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
+      table(document.getElementById("geometryTable"), [["文件", "source_file"], ["类型", "kind"], ["闭合", r => r.closed ? "是" : "否"], ["自动面积参考 mm²", r => Number(r.area_mm2 || 0).toFixed(4)], ["自动周长参考 mm", r => Number(r.perimeter_mm || 0).toFixed(4)], ["宽×高 mm", r => `${Number(r.width_mm || 0).toFixed(4)}×${Number(r.height_mm || 0).toFixed(4)}`], ["备注", "note"]], data.geometry_rows || []);
       table(document.getElementById("quoteTable"), [["文件", "source_file"], ["图号", "drawing_no"], ["名称", "name"], ["尺寸", "size_mm"], ["孔数", "hole_count"], ["穿孔", "pierce_count"], ["切割m", r => Number(r.cut_length_m || 0).toFixed(4)], ["单价", r => Number(r.unit_price || 0).toFixed(4)], ["金额", r => Number(r.amount || 0).toFixed(4)], ["备注", "note"]], data.quote_rows || []);
       downloads.innerHTML = data.downloads ? `<a href="${data.downloads.csv}">下载 CSV</a><a href="${data.downloads.xlsx}">下载 Excel</a>` : "";
     }
@@ -406,7 +406,7 @@ def _add_open_path_review_rows(batch: BatchAnalysisResult, rates: QuoteRates) ->
         result.warnings.append("开放路径已按切割费生成待确认报价；未计材料面积/重量。")
 
 
-def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, pierce_count: int, source_name: str, drawing_no: str = "", name: str = "") -> QuoteRow:
+def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, pierce_count: int, source_name: str, drawing_no: str = "", name: str = "", massprop_object_count: Optional[int] = None) -> QuoteRow:
     width_text = "CAD复核"
     net_weight = area_mm2 * rates.thickness_mm * rates.density_g_cm3 / KG_DENSITY_FACTOR
     cut_m = perimeter_mm / 1000.0
@@ -416,6 +416,8 @@ def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, p
     base = material_fee + cut_fee + pierce_fee + rates.other_process_fee_each
     unit_price = max(rates.min_charge_each, base * (1 + rates.profit_rate) * (1 + rates.tax_rate))
     note = f"人工确认 CAD 数据报价；源文件 {source_name}；面积/周长来自 MASSPROP"
+    if massprop_object_count is not None:
+        note += f"；MASSPROP 选择对象 {massprop_object_count} 个，此数不等于穿孔数"
     return QuoteRow(
         1,
         1,
@@ -444,7 +446,7 @@ def _manual_quote_row(rates: QuoteRates, area_mm2: float, perimeter_mm: float, p
     )
 
 
-def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manual_area_mm2: Optional[float], manual_perimeter_mm: Optional[float], manual_pierce_count: Optional[int]) -> bool:
+def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manual_area_mm2: Optional[float], manual_perimeter_mm: Optional[float], manual_pierce_count: Optional[int], massprop_object_count: Optional[int] = None) -> bool:
     for item in batch.items:
         if item.result:
             item.result.quote_rows.clear()
@@ -463,7 +465,7 @@ def _apply_manual_cad_quote(batch: BatchAnalysisResult, rates: QuoteRates, manua
             continue
         item.result.warnings.append("已使用人工确认 CAD 面积/周长生成报价，自动 DXF 解析结果仅作预览和复核参考。")
         if not first_applied:
-            item.result.quote_rows.append(_manual_quote_row(rates, area, perimeter, pierce_count, Path(item.source_file).name, item.result.drawing_no, item.result.name))
+            item.result.quote_rows.append(_manual_quote_row(rates, area, perimeter, pierce_count, Path(item.source_file).name, item.result.drawing_no, item.result.name, massprop_object_count))
             first_applied = True
     return first_applied
 
@@ -477,22 +479,24 @@ def _decode_text_upload(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _parse_massprop_text(text: str) -> Tuple[Optional[float], Optional[float]]:
+def _parse_massprop_text(text: str) -> Tuple[Optional[float], Optional[float], Optional[int]]:
     area_match = re.search(r"(?:面积|Area)\s*[:：]\s*([-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?)", text, re.I)
     perimeter_match = re.search(r"(?:周长|Perimeter)\s*[:：]\s*([-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?)", text, re.I)
+    object_match = re.search(r"(?:找到|found)\s*(\d+)\s*(?:个|objects?)", text, re.I)
     area = float(area_match.group(1)) if area_match else None
     perimeter = float(perimeter_match.group(1)) if perimeter_match else None
-    return area, perimeter
+    object_count = int(object_match.group(1)) if object_match else None
+    return area, perimeter, object_count
 
 
-async def _massprop_values(upload: Optional[UploadFile]) -> Tuple[Optional[float], Optional[float]]:
+async def _massprop_values(upload: Optional[UploadFile]) -> Tuple[Optional[float], Optional[float], Optional[int]]:
     if upload is None or not upload.filename:
-        return None, None
+        return None, None, None
     text = _decode_text_upload(await upload.read())
-    area, perimeter = _parse_massprop_text(text)
+    area, perimeter, object_count = _parse_massprop_text(text)
     if area is None or perimeter is None:
         raise HTTPException(status_code=400, detail="MASSPROP 文本未识别到面积和周长，请确认文件包含“面积:”和“周长:”")
-    return area, perimeter
+    return area, perimeter, object_count
 
 
 async def _save_uploads(files: List[UploadFile], job_dir: Path) -> List[Path]:
@@ -554,14 +558,14 @@ async def quote(files: List[UploadFile] = File(...), massprop_file: Optional[Upl
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     job_dir = Path(tempfile.mkdtemp(prefix="job_", dir=JOB_ROOT))
     saved_paths = await _save_uploads(files, job_dir)
-    massprop_area, massprop_perimeter = await _massprop_values(massprop_file)
+    massprop_area, massprop_perimeter, massprop_object_count = await _massprop_values(massprop_file)
     if massprop_area is not None:
         manual_area_mm2 = massprop_area
     if massprop_perimeter is not None:
         manual_perimeter_mm = massprop_perimeter
     rates = QuoteRates(material=material, thickness_mm=thickness_mm, quantity=quantity, density_g_cm3=density_g_cm3, material_price_per_kg=material_price_per_kg, scrap_price_per_kg=scrap_price_per_kg, cut_price_per_meter=cut_price_per_meter, pierce_price_each=pierce_price_each, point_mark_diameter_mm=point_mark_diameter_mm, other_process_fee_each=other_process_fee_each, profit_rate=profit_rate, tax_rate=tax_rate, min_charge_each=min_charge_each)
     batch = analyze_dxf_batch(saved_paths, rates=rates, dedupe_identical=dedupe_identical, selection_bbox=_selection_bbox(select_min_x, select_min_y, select_max_x, select_max_y))
-    manual_applied = _apply_manual_cad_quote(batch, rates, manual_area_mm2, manual_perimeter_mm, manual_pierce_count)
+    manual_applied = _apply_manual_cad_quote(batch, rates, manual_area_mm2, manual_perimeter_mm, manual_pierce_count, massprop_object_count)
     if quote_open_paths and not manual_applied:
         _add_open_path_review_rows(batch, rates)
     csv_path = job_dir / "batch_quote.csv"

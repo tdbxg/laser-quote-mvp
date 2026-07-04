@@ -111,7 +111,7 @@ def test_quote_api_can_parse_uploaded_massprop_text() -> None:
         "/api/quote",
         files=[
             ("files", ("sample.dxf", _simple_dxf_bytes(), "application/dxf")),
-            ("massprop_file", ("massprop.txt", "面积:\n  939439.9243\n周长:\n  9590.5885\n".encode("utf-8"), "text/plain")),
+            ("massprop_file", ("massprop.txt", "选择对象: 指定对角点: 找到 99 个\n面积:\n  939439.9243\n周长:\n  9590.5885\n".encode("utf-8"), "text/plain")),
         ],
         data={
             "thickness_mm": "10",
@@ -128,6 +128,7 @@ def test_quote_api_can_parse_uploaded_massprop_text() -> None:
     row = response.json()["quote_rows"][0]
     assert row["net_area_mm2"] == 939439.9243
     assert math.isclose(row["cut_length_m"], 9.5905885, rel_tol=1e-12)
+    assert "选择对象 99 个" in row["note"]
 
 
 def test_web_index_is_served() -> None:
