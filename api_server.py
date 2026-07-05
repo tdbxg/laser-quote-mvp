@@ -171,33 +171,40 @@ INDEX_HTML = """<!doctype html>
       if (!points || points.length < 2) return "";
       return points.map((p, i) => `${i ? "L" : "M"}${Number(p[0]).toFixed(4)},${Number(p[1]).toFixed(4)}`).join(" ");
     }
+    function displayPoint(p) { return [p[0], -p[1]]; }
+    function displayBbox(b) { return [b[0], -b[3], b[2], -b[1]]; }
+    function cadBbox(b) { return [b[0], -b[3], b[2], -b[1]]; }
     function drawPreview(rows) {
       previewRows = rows;
       if (!rows.length) { previewBox.innerHTML = ""; return; }
-      const bboxes = rows.map(r => r.bbox).filter(b => Array.isArray(b) && b.length === 4);
+      const bboxes = rows.map(r => r.bbox).filter(b => Array.isArray(b) && b.length === 4).map(displayBbox);
       if (!bboxes.length) { previewBox.innerHTML = ""; return; }
       const minX = Math.min(...bboxes.map(b => b[0])), minY = Math.min(...bboxes.map(b => b[1]));
       const maxX = Math.max(...bboxes.map(b => b[2])), maxY = Math.max(...bboxes.map(b => b[3]));
       const pad = Math.max(maxX - minX, maxY - minY) * 0.03 || 1;
       const view = [minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2];
       const current = selectedBbox();
+      const currentDisplay = current ? displayBbox(current) : null;
       const strokeWidth = Math.max(view[2], view[3]) / 2400;
       const shapes = rows.map((r) => {
         if (r.outer_points && r.outer_points.length > 1) {
-          const outer = `<path d="${pointPath(r.outer_points)}" style="fill:none!important" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.78"></path>`;
-          const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path)}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></path>`).join("");
-          const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></circle>`).join("");
+          const outer = `<path d="${pointPath(r.outer_points.map(displayPoint))}" style="fill:none!important" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.78"></path>`;
+          const inners = (r.inner_paths || []).map(path => `<path d="${pointPath(path.map(displayPoint))}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></path>`).join("");
+          const holes = (r.hole_circles || []).map(c => `<circle cx="${c.cx}" cy="${-c.cy}" r="${c.r}" style="fill:none!important" stroke="#fbbf24" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.82"></circle>`).join("");
           const pointSize = Math.max(view[2], view[3]) / 700;
           const markDiameter = Number(r.point_mark_diameter_mm || 0);
-          const marks = (r.point_marks || []).map(p => markDiameter > 0
-            ? `<circle cx="${p[0]}" cy="${p[1]}" r="${markDiameter / 2}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></circle>`
-            : `<path d="M${p[0] - pointSize},${p[1]}L${p[0] + pointSize},${p[1]}M${p[0]},${p[1] - pointSize}L${p[0]},${p[1] + pointSize}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></path>`).join("");
+          const marks = (r.point_marks || []).map(p => {
+            const [x, y] = displayPoint(p);
+            return markDiameter > 0
+              ? `<circle cx="${x}" cy="${y}" r="${markDiameter / 2}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></circle>`
+              : `<path d="M${x - pointSize},${y}L${x + pointSize},${y}M${x},${y - pointSize}L${x},${y + pointSize}" style="fill:none!important" stroke="#e5e7eb" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke" opacity="0.9"></path>`;
+          }).join("");
           return outer + inners + holes + marks;
         }
-        const b = r.bbox;
+        const b = displayBbox(r.bbox);
         return `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(0.001, b[2]-b[0])}" height="${Math.max(0.001, b[3]-b[1])}" fill="none" stroke="#34d399" stroke-width="${strokeWidth}" vector-effect="non-scaling-stroke"></rect>`;
       }).join("");
-      const selected = current ? `<rect id="selectionRect" x="${current[0]}" y="${current[1]}" width="${current[2]-current[0]}" height="${current[3]-current[1]}" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>` : `<rect id="selectionRect" x="0" y="0" width="0" height="0" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>`;
+      const selected = currentDisplay ? `<rect id="selectionRect" x="${currentDisplay[0]}" y="${currentDisplay[1]}" width="${currentDisplay[2]-currentDisplay[0]}" height="${currentDisplay[3]-currentDisplay[1]}" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>` : `<rect id="selectionRect" x="0" y="0" width="0" height="0" fill="rgba(37,99,235,.18)" stroke="#60a5fa" stroke-width="${view[2] / 400}" vector-effect="non-scaling-stroke"></rect>`;
       previewBox.innerHTML = `<svg id="previewSvg" viewBox="${view.join(" ")}" preserveAspectRatio="xMidYMid meet">${shapes}${selected}</svg>`;
       const svg = document.getElementById("previewSvg");
       const selectionRect = document.getElementById("selectionRect");
@@ -231,7 +238,7 @@ INDEX_HTML = """<!doctype html>
         if (!previewState.start) return;
         const p = point(event), bbox = [Math.min(previewState.start[0], p[0]), Math.min(previewState.start[1], p[1]), Math.max(previewState.start[0], p[0]), Math.max(previewState.start[1], p[1])];
         previewState.start = null;
-        if ((bbox[2] - bbox[0]) > view[2] * 0.002 && (bbox[3] - bbox[1]) > view[3] * 0.002) setSelection(bbox);
+        if ((bbox[2] - bbox[0]) > view[2] * 0.002 && (bbox[3] - bbox[1]) > view[3] * 0.002) setSelection(cadBbox(bbox));
       });
     }
     document.getElementById("zoomIn").addEventListener("click", () => previewState && previewState.zoomCenter(0.8));
