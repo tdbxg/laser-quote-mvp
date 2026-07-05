@@ -332,24 +332,38 @@ def _massprop_rows(batch: BatchAnalysisResult, source: str = "自动识别") -> 
     for item in batch.items:
         if not item.result:
             continue
-        geometries = [g for g in item.result.basic_geometries if g.closed and g.area_mm2 > 0]
-        if not geometries:
+        previews = [preview for preview in item.result.profile_previews if preview.massprop_area_mm2 > 0]
+        if not previews:
+            geometries = [g for g in item.result.basic_geometries if g.closed and g.area_mm2 > 0]
+            previews = []
+        if not previews and not geometries:
             continue
-        area = sum(g.area_mm2 for g in geometries)
-        perimeter = sum(g.perimeter_mm for g in geometries)
-        min_x = min(g.bbox[0] for g in geometries)
-        min_y = min(g.bbox[1] for g in geometries)
-        max_x = max(g.bbox[2] for g in geometries)
-        max_y = max(g.bbox[3] for g in geometries)
+        if previews:
+            area = sum(preview.massprop_area_mm2 for preview in previews)
+            perimeter = sum(preview.massprop_perimeter_mm for preview in previews)
+            min_x = min(preview.bbox[0] for preview in previews)
+            min_y = min(preview.bbox[1] for preview in previews)
+            max_x = max(preview.bbox[2] for preview in previews)
+            max_y = max(preview.bbox[3] for preview in previews)
+            object_count = sum(1 + len(preview.inner_paths) + len(preview.hole_circles) for preview in previews)
+            geometries = []
+        else:
+            area = sum(g.area_mm2 for g in geometries)
+            perimeter = sum(g.perimeter_mm for g in geometries)
+            min_x = min(g.bbox[0] for g in geometries)
+            min_y = min(g.bbox[1] for g in geometries)
+            max_x = max(g.bbox[2] for g in geometries)
+            max_y = max(g.bbox[3] for g in geometries)
+            object_count = len(geometries)
         centroid = None
-        if area > 0 and all(g.centroid is not None for g in geometries):
+        if geometries and area > 0 and all(g.centroid is not None for g in geometries):
             centroid = (
                 sum((g.centroid[0] if g.centroid else 0.0) * g.area_mm2 for g in geometries) / area,
                 sum((g.centroid[1] if g.centroid else 0.0) * g.area_mm2 for g in geometries) / area,
             )
         rows.append({
             "source_file": Path(item.source_file).name,
-            "object_count": len(geometries),
+            "object_count": object_count,
             "area_mm2": area,
             "perimeter_mm": perimeter,
             "bbox": (min_x, min_y, max_x, max_y),

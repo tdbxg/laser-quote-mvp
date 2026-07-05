@@ -243,6 +243,8 @@ class ProfilePreview:
     cut_length_m: float
     gross_area_mm2: float
     net_area_mm2: float
+    massprop_area_mm2: float
+    massprop_perimeter_mm: float
 
 
 @dataclass
@@ -605,7 +607,13 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
             end_vertex = _ref_id(parts[6])
             curve_id = _ref_id(parts[9])
             if start_vertex is not None and end_vertex is not None and curve_id is not None:
-                edges.append({"start_vertex": start_vertex, "end_vertex": end_vertex, "curve": curve_id})
+                try:
+                    start_param = float(parts[5])
+                    end_param = float(parts[7])
+                except ValueError:
+                    start_param = None
+                    end_param = None
+                edges.append({"start_vertex": start_vertex, "end_vertex": end_vertex, "curve": curve_id, "start_param": start_param, "end_param": end_param})
 
     segments: List[Line | Arc] = []
     for edge in edges:
@@ -617,9 +625,9 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
         if p1 is None or p2 is None or curve is None:
             skip("unsupported_acis:edge")
             continue
-        if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= 1e-9:
-            continue
         if curve["kind"] == "line":
+            if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= 1e-9:
+                continue
             segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1]))
         elif curve["kind"] == "ellipse":
             major = curve["major"]
@@ -630,7 +638,16 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
             center = curve["center"]
             start_deg = _angle_deg(center, p1)
             end_deg = _angle_deg(center, p2)
-            sweep = _short_signed_sweep(start_deg, end_deg)
+            param_span = None
+            if edge.get("start_param") is not None and edge.get("end_param") is not None:
+                param_span = float(edge["end_param"]) - float(edge["start_param"])
+            if param_span is not None and abs(abs(param_span) - math.tau) <= 1e-7:
+                sweep = math.degrees(param_span)
+                end_deg = start_deg + sweep
+            else:
+                if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= 1e-9:
+                    continue
+                sweep = _short_signed_sweep(start_deg, end_deg)
             segments.append(Arc(layer, center[0], center[1], radius, start_deg, end_deg, sweep))
     if segments:
         skipped["exact_type:REGION"] = skipped.get("exact_type:REGION", 0) + len(segments)
@@ -1018,6 +1035,12 @@ def build_closed_components(segments: List[Line | Arc], tol: float = 0.05) -> Li
         comps.setdefault(find(k1), []).append(original_idx)
     for seg_indices in comps.values():
         if len(seg_indices) < 2:
+            seg = segments[seg_indices[0]]
+            pts = seg.points()
+            closed = len(pts) >= 3 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= tol and shoelace_area(pts) > 1
+            if not closed:
+                continue
+            result.append(PathComponent([seg], pts, seg.length(), exact_path_area([seg], [(0, False)]), bbox_of_points(pts), True))
             continue
         degree: Dict[Tuple[int, int], int] = {}
         for idx in seg_indices:
@@ -1094,7 +1117,8 @@ def assign_profiles(segments: List[Line | Arc], circles: List[Circle], points: S
 def suppress_layout_profiles(profiles: Sequence[PartProfile], selection_bbox: Optional[Tuple[float, float, float, float]] = None) -> Tuple[List[PartProfile], int]:
     if selection_bbox is not None or len(profiles) < 3:
         return list(profiles), 0
-    baseline_area = min(p.outer_area_mm2 for p in profiles)
+    detailed_areas = sorted(p.outer_area_mm2 for p in profiles if p.hole_count > 0)
+    baseline_area = detailed_areas[len(detailed_areas) // 2] if len(detailed_areas) >= 2 else min(p.outer_area_mm2 for p in profiles)
     if baseline_area <= 0:
         return list(profiles), 0
     kept: List[PartProfile] = []
@@ -1154,7 +1178,9 @@ def deduplicate_profiles(profiles: List[PartProfile]) -> Tuple[List[PartProfile]
 
 def make_profile_preview(profile: PartProfile, selected_by_default: bool, rates: Optional[QuoteRates] = None) -> ProfilePreview:
     point_diameter = rates.point_mark_diameter_mm if rates else 0.0
-    return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], [(p.x, p.y) for p in profile.point_marks], point_diameter, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_with_point_marks_mm(point_diameter) / 1000.0, profile.gross_area_mm2, profile.net_area_with_point_marks_mm2(point_diameter))
+    massprop_area = profile.outer.area_mm2 + sum(path.area_mm2 for path in profile.inner_paths) + sum(math.pi * hole.r * hole.r for hole in profile.holes)
+    massprop_perimeter = profile.outer.length_mm + sum(path.length_mm for path in profile.inner_paths) + sum(hole.length() for hole in profile.holes)
+    return ProfilePreview(profile.index, selected_by_default, profile.duplicate_count, profile.outer.bbox, profile.outer.points, [{"cx": h.cx, "cy": h.cy, "r": h.r} for h in profile.holes], [p.points for p in profile.inner_paths], [(p.x, p.y) for p in profile.point_marks], point_diameter, f"{profile.width_mm:.1f}×{profile.height_mm:.1f}", profile.hole_count, profile.pierce_count, profile.cut_length_with_point_marks_mm(point_diameter) / 1000.0, profile.gross_area_mm2, profile.net_area_with_point_marks_mm2(point_diameter), massprop_area, massprop_perimeter)
 
 
 def make_basic_geometry(index: int, kind: str, points: Sequence[Tuple[float, float]], perimeter_mm: float, bbox: Tuple[float, float, float, float], closed: bool, approximate: bool, note: str, area_override: Optional[float] = None) -> BasicGeometry:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from quote_core import Arc, Line, QuoteRates, analyze_dxf, build_closed_components
+from quote_core import Arc, Line, PartProfile, PathComponent, PointMark, QuoteRates, _segments_from_acis_data, analyze_dxf, build_closed_components, suppress_layout_profiles
 
 
 SAMPLE = Path(__file__).resolve().parents[1] / "sample_data" / "sample.dxf"
@@ -123,6 +123,47 @@ def test_closed_polyline_keeps_source_order() -> None:
     assert components[0].closed
     assert components[0].points == points
     assert math.isclose(components[0].area_mm2, 4500.0, rel_tol=1e-12)
+
+
+def test_acis_full_circle_region_edge_is_preserved() -> None:
+    segments, skipped = _segments_from_acis_data([
+        "body $-1 -1 $-1 $1 $-1 $-1 #",
+        "lump $-1 -1 $-1 $-1 $2 $0 #",
+        "shell $-1 -1 $-1 $-1 $-1 $3 $-1 $1 #",
+        "face $-1 -1 $-1 $-1 $4 $2 $-1 $5 forward double out #",
+        "loop $-1 -1 $-1 $-1 $6 $3 #",
+        "plane-surface $-1 -1 $-1 0 0 0 0 0 1 1 0 0 forward_v I I I I #",
+        "coedge $-1 -1 $-1 $6 $6 $-1 $7 forward $4 $-1 #",
+        "edge $-1 -1 $-1 $8 0 $8 6.2831853071795862 $6 $9 forward @7 unknown #",
+        "vertex $-1 -1 $-1 $7 $10 #",
+        "ellipse-curve $-1 -1 $-1 0 0 0 0 0 1 10 0 0 1 I I #",
+        "point $-1 -1 $-1 10 0 0 #",
+    ], "CUT")
+
+    components = build_closed_components(segments)
+
+    assert skipped["exact_type:REGION"] == 1
+    assert len(components) == 1
+    assert components[0].closed
+    assert math.isclose(components[0].area_mm2, math.pi * 100, rel_tol=1e-12)
+    assert math.isclose(components[0].length_mm, 2 * math.pi * 10, rel_tol=1e-12)
+
+
+def test_noisy_layout_filter_keeps_large_detailed_parts() -> None:
+    def component(area: float, length: float, bbox: tuple[float, float, float, float]) -> PathComponent:
+        return PathComponent([], [(bbox[0], bbox[1]), (bbox[2], bbox[1]), (bbox[2], bbox[3]), (bbox[0], bbox[3]), (bbox[0], bbox[1])], length, area, bbox, True)
+
+    profiles = [
+        PartProfile(1, component(2_900_000, 7000, (0, 0, 2000, 1400))),
+        PartProfile(2, component(414_000, 2900, (3000, 0, 3965, 630)), point_marks=[PointMark("CUT", i, 0) for i in range(21)]),
+        PartProfile(3, component(414_000, 2900, (4500, 0, 5465, 630)), point_marks=[PointMark("CUT", i, 0) for i in range(54)]),
+        PartProfile(4, component(22_000, 700, (0, 2000, 300, 2070))),
+    ]
+
+    kept, suppressed = suppress_layout_profiles(profiles)
+
+    assert [profile.index for profile in kept] == [2, 3]
+    assert suppressed == 2
 
 
 def test_insert_block_geometry_is_expanded(tmp_path: Path) -> None:
