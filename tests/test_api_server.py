@@ -50,6 +50,38 @@ def test_analyze_api_returns_geometry_without_pricing() -> None:
     assert "downloads" not in data
 
 
+def test_preview_api_returns_all_inner_paths() -> None:
+    client = TestClient(app)
+    entities = [
+        "0", "SECTION", "2", "ENTITIES",
+        "0", "LWPOLYLINE", "8", "CUT", "70", "1",
+        "10", "0", "20", "0",
+        "10", "500", "20", "0",
+        "10", "500", "20", "300",
+        "10", "0", "20", "300",
+    ]
+    for i in range(12):
+        x = 20 + i * 35
+        entities.extend([
+            "0", "LWPOLYLINE", "8", "CUT", "70", "1",
+            "10", str(x), "20", "20",
+            "10", str(x + 12), "20", "20",
+            "10", str(x + 12), "20", "40",
+            "10", str(x), "20", "40",
+        ])
+    entities.extend(["0", "ENDSEC", "0", "EOF"])
+
+    response = client.post(
+        "/api/analyze",
+        files={"files": ("many_inner_paths.dxf", "\n".join(entities).encode("utf-8"), "application/dxf")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["preview_rows"]) == 1
+    assert len(data["preview_rows"][0]["inner_paths"]) == 12
+
+
 def test_quote_api_uses_auto_massprop_without_manual_cad_values() -> None:
     client = TestClient(app)
 

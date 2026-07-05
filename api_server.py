@@ -414,9 +414,9 @@ def _preview_rows(batch: BatchAnalysisResult) -> List[Dict[str, Any]]:
                 "part_index": preview.part_index,
                 "bbox": tuple(round(value, 4) for value in preview.bbox),
                 "outer_points": _sample_points(preview.outer_points),
-                "inner_paths": [_sample_points(path, 50) for path in preview.inner_paths[:8]],
-                "hole_circles": [{key: round(value, 4) for key, value in circle.items()} for circle in preview.hole_circles[:40]],
-                "point_marks": [_rounded_point(point) for point in preview.point_marks[:120]],
+                "inner_paths": [_sample_points(path, 80) for path in preview.inner_paths],
+                "hole_circles": [{key: round(value, 4) for key, value in circle.items()} for circle in preview.hole_circles],
+                "point_marks": [_rounded_point(point) for point in preview.point_marks],
                 "point_mark_diameter_mm": round(preview.point_mark_diameter_mm, 4),
             })
     return rows
