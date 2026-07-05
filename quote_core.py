@@ -569,7 +569,8 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
     points: Dict[int, Tuple[float, float]] = {}
     vertices: Dict[int, int] = {}
     curves: Dict[int, Dict[str, Any]] = {}
-    edges: List[Dict[str, Any]] = []
+    edges: Dict[int, Dict[str, Any]] = {}
+    coedges: Dict[int, Dict[str, Any]] = {}
     skipped: Dict[str, int] = {}
 
     def skip(reason: str) -> None:
@@ -613,10 +614,15 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
                 except ValueError:
                     start_param = None
                     end_param = None
-                edges.append({"start_vertex": start_vertex, "end_vertex": end_vertex, "curve": curve_id, "start_param": start_param, "end_param": end_param})
+                edges[record_id] = {"start_vertex": start_vertex, "end_vertex": end_vertex, "curve": curve_id, "start_param": start_param, "end_param": end_param}
+        elif kind == "coedge" and len(parts) >= 10:
+            next_coedge = _ref_id(parts[4])
+            edge_id = _ref_id(parts[7])
+            if next_coedge is not None and edge_id is not None:
+                coedges[record_id] = {"next": next_coedge, "edge": edge_id, "reversed": parts[8].lower() == "reversed"}
 
     segments: List[Line | Arc] = []
-    for edge in edges:
+    def make_segment(edge: Dict[str, Any], reverse: bool = False, path_id: Optional[int] = None) -> Optional[Line | Arc]:
         start_point_id = vertices.get(edge["start_vertex"])
         end_point_id = vertices.get(edge["end_vertex"])
         p1 = points.get(start_point_id) if start_point_id is not None else None
@@ -624,31 +630,64 @@ def _segments_from_acis_data(acis_data: Sequence[str], layer: str = "REGION") ->
         curve = curves.get(edge["curve"])
         if p1 is None or p2 is None or curve is None:
             skip("unsupported_acis:edge")
-            continue
+            return None
+        if reverse:
+            p1, p2 = p2, p1
         if curve["kind"] == "line":
             if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= 1e-9:
-                continue
-            segments.append(Line(layer, p1[0], p1[1], p2[0], p2[1]))
+                return None
+            return Line(layer, p1[0], p1[1], p2[0], p2[1], path_id=path_id)
         elif curve["kind"] == "ellipse":
             major = curve["major"]
             radius = math.hypot(major[0], major[1])
             if radius <= 1e-9 or abs(curve["ratio"] - 1.0) > 1e-7:
                 skip("unsupported_acis:non_circular_ellipse")
-                continue
+                return None
             center = curve["center"]
             start_deg = _angle_deg(center, p1)
             end_deg = _angle_deg(center, p2)
             param_span = None
             if edge.get("start_param") is not None and edge.get("end_param") is not None:
                 param_span = float(edge["end_param"]) - float(edge["start_param"])
-            if param_span is not None and abs(abs(param_span) - math.tau) <= 1e-7:
+                if reverse:
+                    param_span = -param_span
+            if param_span is not None:
                 sweep = math.degrees(param_span)
                 end_deg = start_deg + sweep
             else:
                 if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= 1e-9:
-                    continue
+                    return None
                 sweep = _short_signed_sweep(start_deg, end_deg)
-            segments.append(Arc(layer, center[0], center[1], radius, start_deg, end_deg, sweep))
+            return Arc(layer, center[0], center[1], radius, start_deg, end_deg, sweep, path_id=path_id)
+        return None
+
+    visited: set[int] = set()
+    loop_index = 0
+    for start_id in coedges:
+        if start_id in visited:
+            continue
+        loop_index += 1
+        path_id = id(acis_data) + loop_index
+        current = start_id
+        for _ in range(len(coedges) + 1):
+            if current in visited:
+                break
+            coedge = coedges.get(current)
+            if coedge is None:
+                break
+            visited.add(current)
+            edge = edges.get(coedge["edge"])
+            if edge is not None:
+                segment = make_segment(edge, bool(coedge["reversed"]), path_id)
+                if segment is not None:
+                    segments.append(segment)
+            current = coedge["next"]
+
+    if not segments:
+        for edge in edges.values():
+            segment = make_segment(edge)
+            if segment is not None:
+                segments.append(segment)
     if segments:
         skipped["exact_type:REGION"] = skipped.get("exact_type:REGION", 0) + len(segments)
     return segments, skipped
